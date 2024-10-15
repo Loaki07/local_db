@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  # PostgreSQL service
+  postgres:
+    image: postgres:16
+    container_name: openobserve_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 12345678
+      POSTGRES_DB: openobserve
+    ports:
+      - "5432:5432"
+    network_mode: host
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # MySQL service
+  mysql:
+    image: mysql:8
+    container_name: openobserve_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: 12345678
+      MYSQL_DATABASE: openobserve
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  # SQLite (no container needed, but we can define a volume to store the SQLite file)
+  sqlite:
+    image: busybox
+    container_name: openobserve_sqlite
+    volumes:
+      - ./sqlite_data:/data
+    command: tail -f /dev/null  # Keep the container running for volume usage
+
+volumes:
+  postgres_data:
+  mysql_data:
+  sqlite_data:
+
