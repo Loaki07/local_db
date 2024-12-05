@@ -29,6 +29,9 @@ curl http://localhost:5080/api/default/default/_json -i -u "root@example.com:Com
 
 # Enterprise
 curl http://localhost:5080/api/team1/default/_json -i -u "root@example.com:Complexpass#123"  -d "@output.json"
+
+# Length of recods in json
+jq "length" olympics.json
 ```
 
 
