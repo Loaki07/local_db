@@ -1,7 +1,3 @@
-Sure! Here's the updated README with instructions for installing SQLite on **macOS** as well.
-
----
-
 # Database Testing Guide for PostgreSQL, MySQL, and SQLite
 
 This README provides a step-by-step guide on how to set up and test PostgreSQL, MySQL, and SQLite databases using Docker and the command line. It covers basic commands to list tables, describe table schema, and run SQL queries.
@@ -25,6 +21,16 @@ This README provides a step-by-step guide on how to set up and test PostgreSQL, 
    - Exiting SQLite Shell
 
 ---
+
+## Commands
+```sh
+# Non-enterprise
+curl http://localhost:5080/api/default/default/_json -i -u "root@example.com:Complexpass#123"  -d "@olympics.json"
+
+# Enterprise
+curl http://localhost:5080/api/team1/default/_json -i -u "root@example.com:Complexpass#123"  -d "@output.json"
+```
+
 
 ## PostgreSQL
 
