@@ -19,8 +19,8 @@ generate_timestamp() {
 }
 
 # Calculate the total number of records to generate
-RECORDS_PER_DAY=50 # Assuming 50 records in the input JSON
-TOTAL_RECORDS=$((DAYS_TO_GENERATE * RECORDS_PER_DAY))
+SECONDS_IN_A_DAY=$((24 * 60 * 60))
+TOTAL_RECORDS=$((DAYS_TO_GENERATE * SECONDS_IN_A_DAY / INTERVAL_SECONDS))
 
 # Read the input JSON file
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -34,21 +34,22 @@ INPUT_JSON=$(cat "$INPUT_FILE")
 # Initialize the output JSON array
 echo "[" > "$OUTPUT_FILE"
 
-# Get the starting timestamp
+# Get the starting timestamp (current time)
 CURRENT_TIMESTAMP=$(generate_timestamp)
 
 # Loop to generate data
 for ((i = 0; i < TOTAL_RECORDS; i++)); do
-  # Calculate the record index and day offset
-  RECORD_INDEX=$((i % RECORDS_PER_DAY))
-  DAY_OFFSET=$((i / RECORDS_PER_DAY))
+  # Calculate the record index (loop through the input JSON records)
+  RECORD_INDEX=$((i % $(echo "$INPUT_JSON" | jq 'length')))
 
   # Extract the current record from the input JSON
   RECORD=$(echo "$INPUT_JSON" | jq ".[$RECORD_INDEX]")
 
-  # Generate unique_id and _timestamp
+  # Generate unique_id
   UNIQUE_ID=$(generate_uuid)
-  TIMESTAMP=$((CURRENT_TIMESTAMP + (i * INTERVAL_SECONDS * 1000000)))
+
+  # Calculate the timestamp for this record (going backward in time)
+  TIMESTAMP=$((CURRENT_TIMESTAMP - (i * INTERVAL_SECONDS * 1000000)))
 
   # Add the new fields to the record
   UPDATED_RECORD=$(echo "$RECORD" | jq --arg unique_id "$UNIQUE_ID" --argjson timestamp "$TIMESTAMP" \
