@@ -7,7 +7,7 @@ services:
     container_name: pg
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: 12345678
+      POSTGRES_PASSWORD: password # changed this to be in sync with ofga
       POSTGRES_DB: openobserve
     ports:
       - "5432:5432"
