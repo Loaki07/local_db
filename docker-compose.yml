@@ -19,12 +19,26 @@ services:
     image: mysql:8
     container_name: mysql
     environment:
-      MYSQL_ROOT_PASSWORD: 12345678
+      # default username is root
+      MYSQL_ROOT_PASSWORD: 12345678 
       MYSQL_DATABASE: openobserve
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+  
+  # MariaDB service
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    environment:
+      # default username is root
+      MARIADB_ROOT_PASSWORD: 12345678
+      MARIADB_DATABASE: openobserve
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
 
   # SQLite (no container needed, but we can define a volume to store the SQLite file)
   sqlite:
@@ -37,5 +51,6 @@ services:
 volumes:
   postgres_data:
   mysql_data:
+  mariadb_data:
   sqlite_data:
 
