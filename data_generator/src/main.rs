@@ -25,7 +25,7 @@ struct EnrichedRecord {
     _timestamp: i64,
 }
 
-const DAYS_TO_GENERATE: i64 = 100;
+const DAYS_TO_GENERATE: i64 = 10;
 const INTERVAL_SECONDS: i64 = 10;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,24 +56,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate records in parallel chunks
     let chunk_size = 10000; // Adjust based on your system's memory
-    let chunks = total_records / chunk_size + (if total_records % chunk_size != 0 { 1 } else { 0 });
+    let chunks = total_records / chunk_size
+        + (if total_records % chunk_size != 0 {
+            1
+        } else {
+            0
+        });
 
     for chunk_index in 0..chunks {
         let start = chunk_index * chunk_size;
         let end = (start + chunk_size).min(total_records);
-        
+
         let records: Vec<String> = (start..end)
             .into_par_iter()
             .map(|i| {
                 let record_index = i % input_len;
                 let base_record = &input_data[record_index];
-                
+
                 let enriched = EnrichedRecord {
                     original_data: base_record.original_data.clone(),
                     unique_id: Uuid::new_v4().to_string(),
                     _timestamp: current_timestamp - (i as i64 * INTERVAL_SECONDS * 1_000_000),
                 };
-                
+
                 serde_json::to_string(&enriched).unwrap()
             })
             .collect();
@@ -85,17 +90,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 writer.write_all(b",")?;
             }
         }
-        
+
         // Flush periodically to prevent memory buildup
         writer.flush()?;
-        
-        println!("Progress: {:.1}%", (end as f64 / total_records as f64) * 100.0);
+
+        println!(
+            "Progress: {:.1}%",
+            (end as f64 / total_records as f64) * 100.0
+        );
     }
 
     // Write closing bracket
     writer.write_all(b"]")?;
     writer.flush()?;
 
-    println!("Data generation complete! Output written to '{}'", output_path);
+    println!(
+        "Data generation complete! Output written to '{}'",
+        output_path
+    );
     Ok(())
 }
