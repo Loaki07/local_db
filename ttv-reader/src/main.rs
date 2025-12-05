@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
+// cargo r -- ~/Downloads/740263305421835878456d4.ttv
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
