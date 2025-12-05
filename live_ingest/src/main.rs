@@ -17,6 +17,7 @@ struct OlympicsRecord {
     total_medals: u32,
     rank: u32,
     rank_total_medals: u32,
+    body: String,
 }
 
 #[derive(Debug, Serialize)]
