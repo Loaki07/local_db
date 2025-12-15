@@ -1,0 +1,16 @@
+# Simple VRL for Olympics data enrichment and metrics
+
+# Calculate weighted medal score (Gold=3, Silver=2, Bronze=1)
+.weighted_score = (to_int!(.gold_medals) * 3) + (to_int!(.silver_medals) * 2) + to_int!(.bronze_medals)
+
+# Calculate gold percentage
+.gold_percentage, err = to_float(.gold_medals) / to_float(.total_medals) * 100.0
+
+# Add performance tier
+.performance_tier = if to_int!(.gold_medals) >= 20 { "High" } else if to_int!(.gold_medals) >= 10 { "Medium" } else { "Low" }
+
+# Add enrichment timestamp
+.enriched_at = to_string(now())
+
+# Add continent full name
+.continent_full = if to_string!(.continent) == "AME" { "Americas" } else if to_string!(.continent) == "ASI" { "Asia" } else if to_string!(.continent) == "EUR" { "Europe" } else { to_string!(.continent) }

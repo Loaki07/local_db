@@ -1,0 +1,19 @@
+# Alternative VRL for Olympics data enrichment and metrics
+
+# Calculate medal efficiency (medals per rank position)
+.medal_efficiency, err = to_float(.total_medals) / to_float(.rank)
+
+# Calculate medal diversity score
+.diversity_score = (to_float!(.gold_medals) * to_float!(.silver_medals) * to_float!(.bronze_medals)) / 1000.0
+
+# Add top performer flag
+.is_top_performer = to_int!(.rank) <= 5
+
+# Calculate rank gap (difference between rank and total medals rank)
+.rank_gap = to_int!(.rank_total_medals) - to_int!(.rank)
+
+# Add region category
+.region = if to_string!(.continent) == "AME" { "Western" } else if to_string!(.continent) == "ASI" || to_string!(.continent) == "OCE" { "Eastern" } else { "Other" }
+
+# Add medal count category
+.medal_category = if to_int!(.total_medals) >= 100 { "Elite" } else if to_int!(.total_medals) >= 50 { "High" } else { "Medium" }
