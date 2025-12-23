@@ -67,6 +67,30 @@ cargo r -- no-fts
 - `_timestamp` (microsecond timestamp)
 - ❌ `body` field is excluded
 
+### No-Index Mode
+
+Excludes the `continent` field - useful for testing without indexed fields.
+
+```bash
+cargo run -- no-index
+```
+
+or
+
+```bash
+cargo r -- no-index
+```
+
+**Fields included:**
+- All base Olympic fields except `continent`
+- `id`, `name`, `flag_url`
+- `gold_medals`, `silver_medals`, `bronze_medals`, `total_medals`
+- `rank`, `rank_total_medals`
+- `body` (text field with Olympic achievement descriptions)
+- `unique_id` (UUID)
+- `_timestamp` (microsecond timestamp)
+- ❌ `continent` field is excluded
+
 ### New-Fields Mode
 
 Includes all fields from normal mode plus 3 additional randomly generated fields based on Olympic data.

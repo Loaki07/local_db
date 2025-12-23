@@ -25,7 +25,8 @@ struct OlympicsRecord {
 struct EnrichedRecord {
     id: String,
     name: String,
-    continent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continent: Option<String>,
     flag_url: String,
     gold_medals: u32,
     silver_medals: u32,
@@ -45,12 +46,15 @@ struct EnrichedRecord {
     _timestamp: i64,
 }
 
-const API_URL: &str = "http://localhost:5080/api/default/oly/_json";
+const API_URL: &str = "http://localhost:5080/api/default/test1/_json";
+// const API_URL: &str = "https://dev3.internal.zinclabs.dev/api/default/olympics/_json";
 const USERNAME: &str = "root@example.com";
 const PASSWORD: &str = "Complexpass#123";
+// const PASSWORD: &str = "ac0dcdf1c5a1183bd78a9bdb67e18406";
 const RECORDS_PER_SECOND: usize = 2;
 
 // cargo r -- no-fts
+// cargo r -- no-index
 // cargo r
 // cargo r -- new-fields
 #[tokio::main]
@@ -58,8 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check for command line arguments
     let args: Vec<String> = env::args().collect();
     let no_fts_mode = args.iter().any(|arg| arg == "no-fts");
+    let no_index_mode = args.iter().any(|arg| arg == "no-index");
     let new_fields_mode = args.iter().any(|arg| arg == "new-fields");
     let include_body = !no_fts_mode;
+    let include_continent = !no_index_mode;
 
     // Read olympics.json from parent directory
     let olympics_path = "../olympics.json";
@@ -79,6 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Mode: new-fields (includes body + sport_category, athlete_highlight, participation_year)");
     } else if no_fts_mode {
         println!("Mode: no-fts (body field excluded)");
+    } else if no_index_mode {
+        println!("Mode: no-index (continent field excluded)");
     } else {
         println!("Mode: normal (includes body field)");
     }
@@ -143,7 +151,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 EnrichedRecord {
                     id: record.id.clone(),
                     name: record.name.clone(),
-                    continent: record.continent.clone(),
+                    continent: if include_continent {
+                        Some(record.continent.clone())
+                    } else {
+                        None
+                    },
                     flag_url: record.flag_url.clone(),
                     gold_medals: record.gold_medals,
                     silver_medals: record.silver_medals,
