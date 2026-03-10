@@ -1,0 +1,13 @@
+[package]
+name = "k8s_data_gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+chrono = "0.4"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
