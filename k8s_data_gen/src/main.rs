@@ -40,16 +40,25 @@
 ///   Latency:  stream=k8s_traces, type=traces, detection_function=avg(duration_ms)
 ///   Errors:   stream=k8s_traces, type=traces, filter: status=ERROR, detection_function=count(*)
 ///   Svc P99:  custom_sql = "SELECT histogram(_timestamp,'5 minute') AS zo_sql_time, AVG(duration_ms) AS zo_sql_val FROM \"k8s_traces\" WHERE service_name='payments-api' GROUP BY zo_sql_time ORDER BY zo_sql_time"
+use base64::Engine as _;
 use chrono::Utc;
+use opentelemetry_proto::tonic::{
+    collector::trace::v1::{trace_service_client::TraceServiceClient, ExportTraceServiceRequest},
+    common::v1::{any_value::Value, AnyValue, InstrumentationScope, KeyValue},
+    resource::v1::Resource,
+    trace::v1::{ResourceSpans, ScopeSpans, Span, Status},
+};
 use rand::{seq::SliceRandom, Rng};
 use reqwest::Client;
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     env,
     fs::File,
     io::{BufWriter, Write},
     time::Duration,
 };
+use tonic::transport::Channel;
 use uuid::Uuid;
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -62,6 +71,11 @@ const DEFAULT_STREAM_METRICS: &str = "k8s_metrics";
 const DEFAULT_STREAM_TRACES: &str = "k8s_traces";
 const USERNAME: &str = "root@example.com";
 const PASSWORD: &str = "Complexpass#123";
+// const API_BASE: &str = "https://alpha.o2aks1.internal.zinclabs.dev";
+// const DEFAULT_ORG: &str = "3B4JlNUZh869KrnH08IRvuu8rA0";
+// const DEFAULT_STREAM_LOGS: &str = "k8s_logs";
+// const USERNAME: &str = "e2etest@o2-qa.com";
+// const PASSWORD: &str = "abcde1234";
 
 /// Seconds between records per pod in historical mode
 const INTERVAL_SECONDS: i64 = 10;
@@ -78,24 +92,114 @@ struct Pod {
     namespace: &'static str,
     service: &'static str,
     container: &'static str,
-    base_cpu: u32,   // millicores
-    base_mem: u32,   // MB
+    base_cpu: u32, // millicores
+    base_mem: u32, // MB
     base_rps: u32,
-    base_rt: f64,    // ms
-    base_err: f64,   // fraction
+    base_rt: f64,  // ms
+    base_err: f64, // fraction
 }
 
 const PODS: &[Pod] = &[
-    Pod { namespace: "payments",   service: "payments-api",      container: "api",        base_cpu: 350, base_mem: 512, base_rps: 220,  base_rt: 45.0,  base_err: 0.005 },
-    Pod { namespace: "payments",   service: "payments-worker",   container: "worker",     base_cpu: 180, base_mem: 256, base_rps: 80,   base_rt: 30.0,  base_err: 0.002 },
-    Pod { namespace: "inventory",  service: "inventory-service", container: "service",    base_cpu: 280, base_mem: 384, base_rps: 150,  base_rt: 60.0,  base_err: 0.008 },
-    Pod { namespace: "inventory",  service: "inventory-db",      container: "postgres",   base_cpu: 420, base_mem: 768, base_rps: 50,   base_rt: 12.0,  base_err: 0.001 },
-    Pod { namespace: "frontend",   service: "web-server",        container: "nginx",      base_cpu: 120, base_mem: 128, base_rps: 800,  base_rt: 8.0,   base_err: 0.003 },
-    Pod { namespace: "frontend",   service: "static-cdn",        container: "cdn",        base_cpu: 90,  base_mem: 96,  base_rps: 600,  base_rt: 5.0,   base_err: 0.001 },
-    Pod { namespace: "monitoring", service: "prometheus",        container: "prometheus", base_cpu: 460, base_mem: 900, base_rps: 20,   base_rt: 25.0,  base_err: 0.000 },
-    Pod { namespace: "monitoring", service: "grafana",           container: "grafana",    base_cpu: 200, base_mem: 320, base_rps: 40,   base_rt: 120.0, base_err: 0.002 },
-    Pod { namespace: "infra",      service: "nginx-ingress",     container: "controller", base_cpu: 310, base_mem: 256, base_rps: 1200, base_rt: 3.0,   base_err: 0.004 },
-    Pod { namespace: "infra",      service: "coredns",           container: "coredns",    base_cpu: 150, base_mem: 192, base_rps: 400,  base_rt: 2.0,   base_err: 0.000 },
+    Pod {
+        namespace: "payments",
+        service: "payments-api",
+        container: "api",
+        base_cpu: 350,
+        base_mem: 512,
+        base_rps: 220,
+        base_rt: 45.0,
+        base_err: 0.005,
+    },
+    Pod {
+        namespace: "payments",
+        service: "payments-worker",
+        container: "worker",
+        base_cpu: 180,
+        base_mem: 256,
+        base_rps: 80,
+        base_rt: 30.0,
+        base_err: 0.002,
+    },
+    Pod {
+        namespace: "inventory",
+        service: "inventory-service",
+        container: "service",
+        base_cpu: 280,
+        base_mem: 384,
+        base_rps: 150,
+        base_rt: 60.0,
+        base_err: 0.008,
+    },
+    Pod {
+        namespace: "inventory",
+        service: "inventory-db",
+        container: "postgres",
+        base_cpu: 420,
+        base_mem: 768,
+        base_rps: 50,
+        base_rt: 12.0,
+        base_err: 0.001,
+    },
+    Pod {
+        namespace: "frontend",
+        service: "web-server",
+        container: "nginx",
+        base_cpu: 120,
+        base_mem: 128,
+        base_rps: 800,
+        base_rt: 8.0,
+        base_err: 0.003,
+    },
+    Pod {
+        namespace: "frontend",
+        service: "static-cdn",
+        container: "cdn",
+        base_cpu: 90,
+        base_mem: 96,
+        base_rps: 600,
+        base_rt: 5.0,
+        base_err: 0.001,
+    },
+    Pod {
+        namespace: "monitoring",
+        service: "prometheus",
+        container: "prometheus",
+        base_cpu: 460,
+        base_mem: 900,
+        base_rps: 20,
+        base_rt: 25.0,
+        base_err: 0.000,
+    },
+    Pod {
+        namespace: "monitoring",
+        service: "grafana",
+        container: "grafana",
+        base_cpu: 200,
+        base_mem: 320,
+        base_rps: 40,
+        base_rt: 120.0,
+        base_err: 0.002,
+    },
+    Pod {
+        namespace: "infra",
+        service: "nginx-ingress",
+        container: "controller",
+        base_cpu: 310,
+        base_mem: 256,
+        base_rps: 1200,
+        base_rt: 3.0,
+        base_err: 0.004,
+    },
+    Pod {
+        namespace: "infra",
+        service: "coredns",
+        container: "coredns",
+        base_cpu: 150,
+        base_mem: 192,
+        base_rps: 400,
+        base_rt: 2.0,
+        base_err: 0.000,
+    },
 ];
 
 const CLUSTERS: &[&str] = &["prod-us-east-1", "prod-eu-west-1", "staging-us-west-2"];
@@ -103,34 +207,117 @@ const NODES: &[&str] = &["node-1", "node-2", "node-3", "node-4", "node-5"];
 
 // Trace operations per service
 const TRACE_OPS: &[(&str, &[&str])] = &[
-    ("payments-api",      &["POST /checkout", "GET /payment-methods", "POST /refund", "GET /balance"]),
-    ("payments-worker",   &["process_payment", "reconcile_batch", "send_notification"]),
-    ("inventory-service", &["GET /products", "GET /stock", "PUT /reserve", "POST /restock"]),
-    ("inventory-db",      &["SELECT products", "UPDATE stock", "INSERT order_item"]),
-    ("web-server",        &["GET /", "GET /products", "GET /cart", "POST /checkout"]),
-    ("static-cdn",        &["GET /static/js", "GET /static/css", "GET /images"]),
-    ("prometheus",        &["scrape_metrics", "evaluate_rules", "query_range"]),
-    ("grafana",           &["dashboard_load", "panel_query", "alert_evaluate"]),
-    ("nginx-ingress",     &["ROUTE /api", "ROUTE /static", "TLS_HANDSHAKE"]),
-    ("coredns",           &["resolve_internal", "resolve_external", "cache_hit"]),
+    (
+        "payments-api",
+        &[
+            "POST /checkout",
+            "GET /payment-methods",
+            "POST /refund",
+            "GET /balance",
+        ],
+    ),
+    (
+        "payments-worker",
+        &["process_payment", "reconcile_batch", "send_notification"],
+    ),
+    (
+        "inventory-service",
+        &[
+            "GET /products",
+            "GET /stock",
+            "PUT /reserve",
+            "POST /restock",
+        ],
+    ),
+    (
+        "inventory-db",
+        &["SELECT products", "UPDATE stock", "INSERT order_item"],
+    ),
+    (
+        "web-server",
+        &["GET /", "GET /products", "GET /cart", "POST /checkout"],
+    ),
+    (
+        "static-cdn",
+        &["GET /static/js", "GET /static/css", "GET /images"],
+    ),
+    (
+        "prometheus",
+        &["scrape_metrics", "evaluate_rules", "query_range"],
+    ),
+    (
+        "grafana",
+        &["dashboard_load", "panel_query", "alert_evaluate"],
+    ),
+    (
+        "nginx-ingress",
+        &["ROUTE /api", "ROUTE /static", "TLS_HANDSHAKE"],
+    ),
+    (
+        "coredns",
+        &["resolve_internal", "resolve_external", "cache_hit"],
+    ),
 ];
 
 // ── Log-level / message constants ─────────────────────────────────────────────
 
-const LOG_LEVELS_NORMAL: &[(&str, u32)] = &[("DEBUG", 10), ("INFO", 75), ("WARN", 12), ("ERROR", 3)];
-const LOG_LEVELS_ERROR:  &[(&str, u32)] = &[("DEBUG", 2),  ("INFO", 10), ("WARN", 20), ("ERROR", 68)];
+const LOG_LEVELS_NORMAL: &[(&str, u32)] =
+    &[("DEBUG", 10), ("INFO", 75), ("WARN", 12), ("ERROR", 3)];
+const LOG_LEVELS_ERROR: &[(&str, u32)] = &[("DEBUG", 2), ("INFO", 10), ("WARN", 20), ("ERROR", 68)];
 
 const EVENT_TYPES: &[&str] = &[
-    "request", "request", "request", "request", "request", "request", "request",
-    "healthcheck", "pod_lifecycle",
+    "request",
+    "request",
+    "request",
+    "request",
+    "request",
+    "request",
+    "request",
+    "healthcheck",
+    "pod_lifecycle",
     "login",
 ];
 
-const MESSAGES_INFO:  &[&str] = &["Processed request successfully", "Cache hit for key", "Health check passed", "Database query completed", "gRPC call returned OK", "Scheduled job ran", "Config reload triggered"];
-const MESSAGES_WARN:  &[&str] = &["Slow query detected, took >500ms", "Retry attempt 1 of 3", "Connection pool near capacity", "Rate limit threshold approaching", "Certificate expiring in 14 days"];
-const MESSAGES_ERROR: &[&str] = &["Upstream service returned 503", "Database connection timeout", "Failed to parse response body", "OOMKilled: container exceeded memory limit", "Panic: index out of bounds", "TLS handshake failed", "Request queue overflow, dropping request"];
-const MESSAGES_LOGIN_OK:    &[&str] = &["User login successful", "Service account authenticated", "OAuth token validated", "API key auth successful"];
-const MESSAGES_LOGIN_ERROR: &[&str] = &["login error: invalid credentials for user", "login error: account locked after repeated failures", "login error: token expired or revoked", "login error: IP blocked after too many attempts", "login error: MFA verification failed", "login error: service account rejected", "login error: brute force attempt detected"];
+const MESSAGES_INFO: &[&str] = &[
+    "Processed request successfully",
+    "Cache hit for key",
+    "Health check passed",
+    "Database query completed",
+    "gRPC call returned OK",
+    "Scheduled job ran",
+    "Config reload triggered",
+];
+const MESSAGES_WARN: &[&str] = &[
+    "Slow query detected, took >500ms",
+    "Retry attempt 1 of 3",
+    "Connection pool near capacity",
+    "Rate limit threshold approaching",
+    "Certificate expiring in 14 days",
+];
+const MESSAGES_ERROR: &[&str] = &[
+    "Upstream service returned 503",
+    "Database connection timeout",
+    "Failed to parse response body",
+    "OOMKilled: container exceeded memory limit",
+    "Panic: index out of bounds",
+    "TLS handshake failed",
+    "Request queue overflow, dropping request",
+];
+const MESSAGES_LOGIN_OK: &[&str] = &[
+    "User login successful",
+    "Service account authenticated",
+    "OAuth token validated",
+    "API key auth successful",
+];
+const MESSAGES_LOGIN_ERROR: &[&str] = &[
+    "login error: invalid credentials for user",
+    "login error: account locked after repeated failures",
+    "login error: token expired or revoked",
+    "login error: IP blocked after too many attempts",
+    "login error: MFA verification failed",
+    "login error: service account rejected",
+    "login error: brute force attempt detected",
+];
 
 /// ~0.5% of live records → ~3 login errors/min background noise for RCF training
 const LOGIN_ERROR_BACKGROUND_PROB: f64 = 0.005;
@@ -228,24 +415,24 @@ enum AnomalyType {
 impl AnomalyType {
     fn from_str(s: &str) -> Option<Self> {
         match s {
-            "cpu"      => Some(AnomalyType::Cpu),
-            "memory"   => Some(AnomalyType::Memory),
-            "errors"   => Some(AnomalyType::Errors),
+            "cpu" => Some(AnomalyType::Cpu),
+            "memory" => Some(AnomalyType::Memory),
+            "errors" => Some(AnomalyType::Errors),
             "restarts" => Some(AnomalyType::Restarts),
-            "latency"  => Some(AnomalyType::Latency),
-            "login"    => Some(AnomalyType::Login),
+            "latency" => Some(AnomalyType::Latency),
+            "login" => Some(AnomalyType::Login),
             _ => None,
         }
     }
 
     fn label(&self) -> &'static str {
         match self {
-            AnomalyType::Cpu      => "cpu",
-            AnomalyType::Memory   => "memory",
-            AnomalyType::Errors   => "errors",
+            AnomalyType::Cpu => "cpu",
+            AnomalyType::Memory => "memory",
+            AnomalyType::Errors => "errors",
             AnomalyType::Restarts => "restarts",
-            AnomalyType::Latency  => "latency",
-            AnomalyType::Login    => "login",
+            AnomalyType::Latency => "latency",
+            AnomalyType::Login => "login",
         }
     }
 }
@@ -258,7 +445,11 @@ struct AnomalyState {
 
 impl AnomalyState {
     fn new(anomaly_type: AnomalyType) -> Self {
-        AnomalyState { anomaly_type, remaining_secs: 0, cooldown_secs: 30 }
+        AnomalyState {
+            anomaly_type,
+            remaining_secs: 0,
+            cooldown_secs: 30,
+        }
     }
 
     fn tick(&mut self, rng: &mut impl Rng) {
@@ -273,7 +464,11 @@ impl AnomalyState {
         if rng.gen_bool(0.10) {
             self.remaining_secs = rng.gen_range(120..=300);
             self.cooldown_secs = 120;
-            println!("[ANOMALY] {} spike started — {}s", self.anomaly_type.label(), self.remaining_secs);
+            println!(
+                "[ANOMALY] {} spike started — {}s",
+                self.anomaly_type.label(),
+                self.remaining_secs
+            );
         }
     }
 
@@ -288,7 +483,9 @@ fn weighted_choice<'a>(choices: &[(&'a str, u32)], rng: &mut impl Rng) -> &'a st
     let total: u32 = choices.iter().map(|(_, w)| w).sum();
     let mut pick = rng.gen_range(0..total);
     for (item, weight) in choices {
-        if pick < *weight { return item; }
+        if pick < *weight {
+            return item;
+        }
         pick -= weight;
     }
     choices.last().unwrap().0
@@ -341,7 +538,11 @@ fn generate_log_record(
 
     let restarts: u32 = if is_anomaly && anomaly_type == Some(&AnomalyType::Restarts) {
         rng.gen_range(5..=15)
-    } else if rng.gen_bool(0.002) { 1 } else { 0 };
+    } else if rng.gen_bool(0.002) {
+        1
+    } else {
+        0
+    };
 
     let response_time = if is_anomaly && anomaly_type == Some(&AnomalyType::Latency) {
         pod.base_rt * rng.gen_range(15.0..40.0) * (1.0 + rng.gen_range(-0.30_f64..=0.30))
@@ -363,7 +564,11 @@ fn generate_log_record(
     let is_login_anomaly = is_anomaly && anomaly_type == Some(&AnomalyType::Login);
 
     let log_level = weighted_choice(
-        if is_error_anomaly { LOG_LEVELS_ERROR } else { LOG_LEVELS_NORMAL },
+        if is_error_anomaly {
+            LOG_LEVELS_ERROR
+        } else {
+            LOG_LEVELS_NORMAL
+        },
         rng,
     );
 
@@ -380,8 +585,8 @@ fn generate_log_record(
         } else {
             match log_level {
                 "ERROR" => MESSAGES_ERROR[rng.gen_range(0..MESSAGES_ERROR.len())].to_string(),
-                "WARN"  => MESSAGES_WARN[rng.gen_range(0..MESSAGES_WARN.len())].to_string(),
-                _       => MESSAGES_INFO[rng.gen_range(0..MESSAGES_INFO.len())].to_string(),
+                "WARN" => MESSAGES_WARN[rng.gen_range(0..MESSAGES_WARN.len())].to_string(),
+                _ => MESSAGES_INFO[rng.gen_range(0..MESSAGES_INFO.len())].to_string(),
             }
         };
         (et, msg)
@@ -390,9 +595,15 @@ fn generate_log_record(
     let status_code: u16 = if error_rate > 0.20 {
         *[500u16, 502, 503, 504][..].choose(rng).unwrap()
     } else if error_rate > 0.05 {
-        if rng.gen_bool(0.5) { 429 } else { 500 }
+        if rng.gen_bool(0.5) {
+            429
+        } else {
+            500
+        }
     } else {
-        *[200u16, 200, 200, 200, 201, 204, 304][..].choose(rng).unwrap()
+        *[200u16, 200, 200, 200, 201, 204, 304][..]
+            .choose(rng)
+            .unwrap()
     };
 
     K8sLogRecord {
@@ -421,7 +632,7 @@ fn generate_log_record(
 
 // ── Metrics record generation ─────────────────────────────────────────────────
 
-const NODE_MEMORY_MB: f64 = 4096.0;  // assume 4 GB nodes
+const NODE_MEMORY_MB: f64 = 4096.0; // assume 4 GB nodes
 
 fn generate_metric_record(
     pod_idx: usize,
@@ -464,7 +675,11 @@ fn generate_metric_record(
 
     let restarts: u32 = if is_anomaly && anomaly_type == Some(&AnomalyType::Restarts) {
         rng.gen_range(5..=15)
-    } else if rng.gen_bool(0.002) { 1 } else { 0 };
+    } else if rng.gen_bool(0.002) {
+        1
+    } else {
+        0
+    };
 
     let rps = (pod.base_rps as f64 * season * (1.0 + rng.gen_range(-0.20_f64..=0.20))).max(0.0);
     let net_rx = (rps as u64).saturating_mul(rng.gen_range(800..1200));
@@ -509,7 +724,8 @@ fn generate_trace_spans(
     let season = daily_seasonal(timestamp_us, 0.20);
 
     // Pick operation for this pod
-    let ops = TRACE_OPS.iter()
+    let ops = TRACE_OPS
+        .iter()
         .find(|(svc, _)| *svc == pod.service)
         .map(|(_, ops)| *ops)
         .unwrap_or(&["unknown"]);
@@ -555,7 +771,10 @@ fn generate_trace_spans(
     }];
 
     // Add 1-2 child spans (downstream calls) for some pods
-    let has_children = matches!(pod.service, "payments-api" | "web-server" | "inventory-service" | "nginx-ingress");
+    let has_children = matches!(
+        pod.service,
+        "payments-api" | "web-server" | "inventory-service" | "nginx-ingress"
+    );
     if has_children && rng.gen_bool(0.7) {
         let child_count = rng.gen_range(1..=2_usize);
         for _ in 0..child_count {
@@ -578,8 +797,17 @@ fn generate_trace_spans(
                 operation_name: format!("call_{}", downstream.service.replace('-', "_")),
                 duration_us: (child_duration * 1000.0) as i64,
                 duration_ms: (child_duration * 10.0).round() / 10.0,
-                status: if is_error && rng.gen_bool(0.5) { "ERROR" } else { "OK" }.to_string(),
-                http_status_code: if is_error && rng.gen_bool(0.5) { 500 } else { 200 },
+                status: if is_error && rng.gen_bool(0.5) {
+                    "ERROR"
+                } else {
+                    "OK"
+                }
+                .to_string(),
+                http_status_code: if is_error && rng.gen_bool(0.5) {
+                    500
+                } else {
+                    200
+                },
                 is_root: false,
             });
         }
@@ -598,6 +826,16 @@ fn generate_trace_spans(
 fn metric_record_to_resource_metrics(r: &K8sMetricRecord) -> serde_json::Value {
     let ts_owned = (r._timestamp * 1000).to_string(); // microseconds → nanoseconds
     let ts = ts_owned.as_str();
+    // Attributes on every data point so namespace/pod/service are filterable in queries.
+    let attrs = serde_json::json!([
+        {"key": "service",   "value": {"stringValue": r.service.as_str()}},
+        {"key": "namespace", "value": {"stringValue": r.namespace.as_str()}},
+        {"key": "pod",       "value": {"stringValue": r.pod.as_str()}},
+        {"key": "node",      "value": {"stringValue": r.node.as_str()}},
+        {"key": "cluster",   "value": {"stringValue": r.cluster.as_str()}},
+    ]);
+    // asInt must be a JSON number (not a string) — NumberDataPoint.AsInt(i64) uses
+    // standard serde which does not accept string-encoded integers.
     serde_json::json!({
         "resource": {
             "attributes": [
@@ -611,16 +849,16 @@ fn metric_record_to_resource_metrics(r: &K8sMetricRecord) -> serde_json::Value {
         "scopeMetrics": [{
             "scope": {"name": "k8s-data-gen"},
             "metrics": [
-                {"name": "cpu_millicores",           "gauge": {"dataPoints": [{"timeUnixNano": ts, "asInt": r.cpu_millicores.to_string()}]}},
-                {"name": "cpu_percent",              "gauge": {"dataPoints": [{"timeUnixNano": ts, "asDouble": r.cpu_percent}]}},
-                {"name": "memory_mb",                "gauge": {"dataPoints": [{"timeUnixNano": ts, "asInt": r.memory_mb.to_string()}]}},
-                {"name": "memory_percent",           "gauge": {"dataPoints": [{"timeUnixNano": ts, "asDouble": r.memory_percent}]}},
-                {"name": "request_latency_ms",       "gauge": {"dataPoints": [{"timeUnixNano": ts, "asDouble": r.request_latency_ms}]}},
-                {"name": "error_rate",               "gauge": {"dataPoints": [{"timeUnixNano": ts, "asDouble": r.error_rate}]}},
-                {"name": "requests_per_second",      "gauge": {"dataPoints": [{"timeUnixNano": ts, "asDouble": r.requests_per_second}]}},
-                {"name": "network_rx_bytes_per_sec", "gauge": {"dataPoints": [{"timeUnixNano": ts, "asInt": r.network_rx_bytes_per_sec.to_string()}]}},
-                {"name": "network_tx_bytes_per_sec", "gauge": {"dataPoints": [{"timeUnixNano": ts, "asInt": r.network_tx_bytes_per_sec.to_string()}]}},
-                {"name": "restarts",                 "gauge": {"dataPoints": [{"timeUnixNano": ts, "asInt": r.restarts.to_string()}]}},
+                {"name": "cpu_millicores",           "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.cpu_millicores as f64}]}},
+                {"name": "cpu_percent",              "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.cpu_percent}]}},
+                {"name": "memory_mb",                "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.memory_mb as f64}]}},
+                {"name": "memory_percent",           "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.memory_percent}]}},
+                {"name": "request_latency_ms",       "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.request_latency_ms}]}},
+                {"name": "error_rate",               "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.error_rate}]}},
+                {"name": "requests_per_second",      "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.requests_per_second}]}},
+                {"name": "network_rx_bytes_per_sec", "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.network_rx_bytes_per_sec as f64}]}},
+                {"name": "network_tx_bytes_per_sec", "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.network_tx_bytes_per_sec as f64}]}},
+                {"name": "restarts",                 "gauge": {"dataPoints": [{"attributes": &attrs, "timeUnixNano": ts, "asDouble": r.restarts as f64}]}},
             ]
         }]
     })
@@ -637,9 +875,9 @@ fn metrics_to_otlp_payload(records: &[K8sMetricRecord]) -> serde_json::Value {
 /// can filter on status=ERROR and aggregate avg(duration_ms).
 fn trace_record_to_resource_spans(s: &K8sTraceRecord) -> serde_json::Value {
     let start_owned = (s._timestamp * 1000).to_string();
-    let end_owned   = ((s._timestamp + s.duration_us) * 1000).to_string();
-    let start_ns    = start_owned.as_str();
-    let end_ns      = end_owned.as_str();
+    let end_owned = ((s._timestamp + s.duration_us) * 1000).to_string();
+    let start_ns = start_owned.as_str();
+    let end_ns = end_owned.as_str();
     let status_code: u8 = if s.status == "ERROR" { 2 } else { 1 }; // 1=OK, 2=ERROR
     let kind: u8 = if s.is_root { 2 } else { 3 }; // 2=SERVER, 3=CLIENT
     serde_json::json!({
@@ -687,8 +925,14 @@ async fn post_otlp(
     record_count: usize,
     anomaly_state: &Option<AnomalyState>,
 ) {
-    let anomaly_active    = anomaly_state.as_ref().map(|a| a.is_active()).unwrap_or(false);
-    let anomaly_remaining = anomaly_state.as_ref().map(|a| a.remaining_secs).unwrap_or(0);
+    let anomaly_active = anomaly_state
+        .as_ref()
+        .map(|a| a.is_active())
+        .unwrap_or(false);
+    let anomaly_remaining = anomaly_state
+        .as_ref()
+        .map(|a| a.remaining_secs)
+        .unwrap_or(0);
 
     let builder = client
         .post(url)
@@ -696,7 +940,7 @@ async fn post_otlp(
         .json(body);
     let builder = match stream_name {
         Some(name) => builder.header("stream-name", name),
-        None       => builder,
+        None => builder,
     };
 
     match builder.send().await {
@@ -706,12 +950,22 @@ async fn post_otlp(
             } else {
                 String::new()
             };
-            println!("[{}] ✓ {} records{}", Utc::now().format("%Y-%m-%d %H:%M:%S"), record_count, suffix);
+            println!(
+                "[{}] ✓ {} records{}",
+                Utc::now().format("%Y-%m-%d %H:%M:%S"),
+                record_count,
+                suffix
+            );
         }
         Ok(resp) => {
             let status = resp.status();
-            let text   = resp.text().await.unwrap_or_default();
-            eprintln!("[{}] ✗ HTTP {}: {}", Utc::now().format("%Y-%m-%d %H:%M:%S"), status, text);
+            let text = resp.text().await.unwrap_or_default();
+            eprintln!(
+                "[{}] ✗ HTTP {}: {}",
+                Utc::now().format("%Y-%m-%d %H:%M:%S"),
+                status,
+                text
+            );
         }
         Err(e) => {
             eprintln!("[{}] ✗ {}", Utc::now().format("%Y-%m-%d %H:%M:%S"), e);
@@ -727,7 +981,10 @@ fn run_historical_logs(days: u32) -> Result<(), Box<dyn std::error::Error>> {
     let total_intervals = (days as i64 * 86_400) / INTERVAL_SECONDS;
     let total_records = total_intervals as usize * num_pods;
 
-    println!("Historical logs: {} days, {} pods → {}", days, num_pods, output_path);
+    println!(
+        "Historical logs: {} days, {} pods → {}",
+        days, num_pods, output_path
+    );
     println!("Total records: {}", total_records);
 
     let file = File::create(output_path)?;
@@ -742,16 +999,24 @@ fn run_historical_logs(days: u32) -> Result<(), Box<dyn std::error::Error>> {
     for interval_idx in 0..total_intervals as usize {
         let ts_us = now_us - (interval_idx as i64 * INTERVAL_SECONDS * 1_000_000);
         for pod_idx in 0..num_pods {
-            let record = generate_log_record(pod_idx, ts_us, None, HISTORICAL_LOGIN_ERROR_PROB, &mut rng);
+            let record =
+                generate_log_record(pod_idx, ts_us, None, HISTORICAL_LOGIN_ERROR_PROB, &mut rng);
             let json = serde_json::to_string(&record)?;
-            if !first { writer.write_all(b",")?; }
+            if !first {
+                writer.write_all(b",")?;
+            }
             writer.write_all(json.as_bytes())?;
             first = false;
             written += 1;
         }
         if written % CHUNK_SIZE == 0 {
             writer.flush()?;
-            println!("Progress: {:.1}% ({}/{})", written as f64 / total_records as f64 * 100.0, written, total_records);
+            println!(
+                "Progress: {:.1}% ({}/{})",
+                written as f64 / total_records as f64 * 100.0,
+                written,
+                total_records
+            );
         }
     }
 
@@ -767,7 +1032,10 @@ fn run_historical_metrics(days: u32) -> Result<(), Box<dyn std::error::Error>> {
     let total_intervals = (days as i64 * 86_400) / INTERVAL_SECONDS;
     let total_records = total_intervals as usize * num_pods;
 
-    println!("Historical metrics: {} days, {} pods → {}", days, num_pods, output_path);
+    println!(
+        "Historical metrics: {} days, {} pods → {}",
+        days, num_pods, output_path
+    );
     println!("Total records: {}", total_records);
 
     let file = File::create(output_path)?;
@@ -784,14 +1052,21 @@ fn run_historical_metrics(days: u32) -> Result<(), Box<dyn std::error::Error>> {
         for pod_idx in 0..num_pods {
             let record = generate_metric_record(pod_idx, ts_us, None, &mut rng);
             let json = serde_json::to_string(&record)?;
-            if !first { writer.write_all(b",")?; }
+            if !first {
+                writer.write_all(b",")?;
+            }
             writer.write_all(json.as_bytes())?;
             first = false;
             written += 1;
         }
         if written % CHUNK_SIZE == 0 {
             writer.flush()?;
-            println!("Progress: {:.1}% ({}/{})", written as f64 / total_records as f64 * 100.0, written, total_records);
+            println!(
+                "Progress: {:.1}% ({}/{})",
+                written as f64 / total_records as f64 * 100.0,
+                written,
+                total_records
+            );
         }
     }
 
@@ -833,7 +1108,9 @@ fn run_historical_traces(days: u32) -> Result<(), Box<dyn std::error::Error>> {
                 let spans = generate_trace_spans(pod_idx, ts_us, None, &mut rng);
                 for span in spans {
                     let json = serde_json::to_string(&span)?;
-                    if !first { writer.write_all(b",")?; }
+                    if !first {
+                        writer.write_all(b",")?;
+                    }
                     writer.write_all(json.as_bytes())?;
                     first = false;
                     written += 1;
@@ -859,7 +1136,11 @@ fn run_historical_traces(days: u32) -> Result<(), Box<dyn std::error::Error>> {
 const INGEST_BATCH_SIZE: usize = 2_000;
 
 #[tokio::main]
-async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_ingest(
+    file_path: &str,
+    org: &str,
+    stream: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
     println!("Ingest mode");
@@ -870,7 +1151,9 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
     let mut raw = String::new();
     File::open(file_path)?.read_to_string(&mut raw)?;
 
-    let client = Client::builder().danger_accept_invalid_certs(true).build()?;
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
 
     match stream {
         // ── Metrics → OTLP /v1/metrics (creates per-field streams of type=metrics)
@@ -879,14 +1162,19 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
             println!("  URL:    {} (OTLP metrics)", url);
             let records: Vec<K8sMetricRecord> = serde_json::from_str(&raw)?;
             let total = records.len();
-            println!("Loaded {} records, sending as OTLP in batches of 100\n", total);
+            println!(
+                "Loaded {} records, sending as OTLP in batches of 100\n",
+                total
+            );
             let mut sent = 0usize;
             for batch in records.chunks(100) {
                 let payload = metrics_to_otlp_payload(batch);
-                let resp = client.post(&url)
+                let resp = client
+                    .post(&url)
                     .basic_auth(USERNAME, Some(PASSWORD))
                     .json(&payload)
-                    .send().await?;
+                    .send()
+                    .await?;
                 let status = resp.status();
                 if !status.is_success() {
                     let text = resp.text().await.unwrap_or_default();
@@ -894,7 +1182,12 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
                     std::process::exit(1);
                 }
                 sent += batch.len();
-                println!("Progress: {:.1}% ({}/{})", sent as f64 / total as f64 * 100.0, sent, total);
+                println!(
+                    "Progress: {:.1}% ({}/{})",
+                    sent as f64 / total as f64 * 100.0,
+                    sent,
+                    total
+                );
             }
             println!("\nDone! Ingested {} records as OTLP metrics", sent);
         }
@@ -902,18 +1195,26 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
         // ── Traces → OTLP /v1/traces with stream-name header (stream_type=traces)
         "k8s_traces" => {
             let url = format!("{}/api/{}/v1/traces", API_BASE, org);
-            println!("  URL:    {} (OTLP traces, stream-name: {})", url, DEFAULT_STREAM_TRACES);
+            println!(
+                "  URL:    {} (OTLP traces, stream-name: {})",
+                url, DEFAULT_STREAM_TRACES
+            );
             let spans: Vec<K8sTraceRecord> = serde_json::from_str(&raw)?;
             let total = spans.len();
-            println!("Loaded {} spans, sending as OTLP in batches of 200\n", total);
+            println!(
+                "Loaded {} spans, sending as OTLP in batches of 200\n",
+                total
+            );
             let mut sent = 0usize;
             for batch in spans.chunks(200) {
                 let payload = traces_to_otlp_payload(batch);
-                let resp = client.post(&url)
+                let resp = client
+                    .post(&url)
                     .basic_auth(USERNAME, Some(PASSWORD))
                     .header("stream-name", DEFAULT_STREAM_TRACES)
                     .json(&payload)
-                    .send().await?;
+                    .send()
+                    .await?;
                 let status = resp.status();
                 if !status.is_success() {
                     let text = resp.text().await.unwrap_or_default();
@@ -921,9 +1222,17 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
                     std::process::exit(1);
                 }
                 sent += batch.len();
-                println!("Progress: {:.1}% ({}/{})", sent as f64 / total as f64 * 100.0, sent, total);
+                println!(
+                    "Progress: {:.1}% ({}/{})",
+                    sent as f64 / total as f64 * 100.0,
+                    sent,
+                    total
+                );
             }
-            println!("\nDone! Ingested {} spans as OTLP traces into {}/{}", sent, org, DEFAULT_STREAM_TRACES);
+            println!(
+                "\nDone! Ingested {} spans as OTLP traces into {}/{}",
+                sent, org, DEFAULT_STREAM_TRACES
+            );
         }
 
         // ── Logs (and any other stream) → flat JSON /_json endpoint
@@ -932,13 +1241,18 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
             println!("  URL:    {}", url);
             let records: Vec<serde_json::Value> = serde_json::from_str(&raw)?;
             let total = records.len();
-            println!("Loaded {} records, sending in batches of {}\n", total, INGEST_BATCH_SIZE);
+            println!(
+                "Loaded {} records, sending in batches of {}\n",
+                total, INGEST_BATCH_SIZE
+            );
             let mut sent = 0usize;
             for batch in records.chunks(INGEST_BATCH_SIZE) {
-                let resp = client.post(&url)
+                let resp = client
+                    .post(&url)
                     .basic_auth(USERNAME, Some(PASSWORD))
                     .json(batch)
-                    .send().await?;
+                    .send()
+                    .await?;
                 let status = resp.status();
                 if !status.is_success() {
                     let text = resp.text().await.unwrap_or_default();
@@ -946,7 +1260,12 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
                     std::process::exit(1);
                 }
                 sent += batch.len();
-                println!("Progress: {:.1}% ({}/{})", sent as f64 / total as f64 * 100.0, sent, total);
+                println!(
+                    "Progress: {:.1}% ({}/{})",
+                    sent as f64 / total as f64 * 100.0,
+                    sent,
+                    total
+                );
             }
             println!("\nDone! Ingested {} records into {}/{}", sent, org, stream);
         }
@@ -958,9 +1277,16 @@ async fn run_ingest(file_path: &str, org: &str, stream: &str) -> Result<(), Box<
 // ── Live mode ─────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn run_live_logs(anomaly_type: Option<AnomalyType>) -> Result<(), Box<dyn std::error::Error>> {
-    let api_url = format!("{}/api/{}/{}/_json", API_BASE, DEFAULT_ORG, DEFAULT_STREAM_LOGS);
-    let client = Client::builder().danger_accept_invalid_certs(true).build()?;
+async fn run_live_logs(
+    anomaly_type: Option<AnomalyType>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let api_url = format!(
+        "{}/api/{}/{}/_json",
+        API_BASE, DEFAULT_ORG, DEFAULT_STREAM_LOGS
+    );
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
     let mut rng = rand::thread_rng();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut anomaly_state = anomaly_type.map(AnomalyState::new);
@@ -971,11 +1297,21 @@ async fn run_live_logs(anomaly_type: Option<AnomalyType>) -> Result<(), Box<dyn 
 
     loop {
         interval.tick().await;
-        if let Some(ref mut s) = anomaly_state { s.tick(&mut rng); }
+        if let Some(ref mut s) = anomaly_state {
+            s.tick(&mut rng);
+        }
 
         let now_us = Utc::now().timestamp_micros();
         let records: Vec<K8sLogRecord> = (0..PODS_PER_TICK)
-            .map(|i| generate_log_record(i, now_us, anomaly_state.as_ref(), LOGIN_ERROR_BACKGROUND_PROB, &mut rng))
+            .map(|i| {
+                generate_log_record(
+                    i,
+                    now_us,
+                    anomaly_state.as_ref(),
+                    LOGIN_ERROR_BACKGROUND_PROB,
+                    &mut rng,
+                )
+            })
             .collect();
 
         post_live(&client, &api_url, &records, &anomaly_state).await;
@@ -983,21 +1319,29 @@ async fn run_live_logs(anomaly_type: Option<AnomalyType>) -> Result<(), Box<dyn 
 }
 
 #[tokio::main]
-async fn run_live_metrics(anomaly_type: Option<AnomalyType>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_live_metrics(
+    anomaly_type: Option<AnomalyType>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let api_url = format!("{}/api/{}/v1/metrics", API_BASE, DEFAULT_ORG);
-    let client = Client::builder().danger_accept_invalid_certs(true).build()?;
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
     let mut rng = rand::thread_rng();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut anomaly_state = anomaly_type.map(AnomalyState::new);
 
     println!("Live metrics (OTLP) → {}", api_url);
-    println!("Streams (type=metrics): cpu_percent, memory_percent, request_latency_ms, error_rate, ...");
+    println!(
+        "Streams (type=metrics): cpu_percent, memory_percent, request_latency_ms, error_rate, ..."
+    );
     print_anomaly_header(&anomaly_state);
     println!("Press Ctrl+C to stop.\n");
 
     loop {
         interval.tick().await;
-        if let Some(ref mut s) = anomaly_state { s.tick(&mut rng); }
+        if let Some(ref mut s) = anomaly_state {
+            s.tick(&mut rng);
+        }
 
         let now_us = Utc::now().timestamp_micros();
         let records: Vec<K8sMetricRecord> = (0..PODS_PER_TICK)
@@ -1005,37 +1349,67 @@ async fn run_live_metrics(anomaly_type: Option<AnomalyType>) -> Result<(), Box<d
             .collect();
 
         let payload = metrics_to_otlp_payload(&records);
-        post_otlp(&client, &api_url, None, &payload, records.len(), &anomaly_state).await;
+        post_otlp(
+            &client,
+            &api_url,
+            None,
+            &payload,
+            records.len(),
+            &anomaly_state,
+        )
+        .await;
     }
 }
 
 #[tokio::main]
-async fn run_live_traces(anomaly_type: Option<AnomalyType>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_live_traces(
+    anomaly_type: Option<AnomalyType>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let api_url = format!("{}/api/{}/v1/traces", API_BASE, DEFAULT_ORG);
-    let client = Client::builder().danger_accept_invalid_certs(true).build()?;
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?;
     let mut rng = rand::thread_rng();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut anomaly_state = anomaly_type.map(AnomalyState::new);
 
-    println!("Live traces (OTLP) → {} [stream-name: {}]", api_url, DEFAULT_STREAM_TRACES);
+    println!(
+        "Live traces (OTLP) → {} [stream-name: {}]",
+        api_url, DEFAULT_STREAM_TRACES
+    );
     print_anomaly_header(&anomaly_state);
     println!("Press Ctrl+C to stop.\n");
 
     loop {
         interval.tick().await;
-        if let Some(ref mut s) = anomaly_state { s.tick(&mut rng); }
+        if let Some(ref mut s) = anomaly_state {
+            s.tick(&mut rng);
+        }
 
         let now_us = Utc::now().timestamp_micros();
         // 3 traces per pod per second → ~30 root spans + children
         let mut spans: Vec<K8sTraceRecord> = Vec::new();
         for pod_idx in 0..PODS_PER_TICK {
             for _ in 0..3 {
-                spans.extend(generate_trace_spans(pod_idx, now_us, anomaly_state.as_ref(), &mut rng));
+                spans.extend(generate_trace_spans(
+                    pod_idx,
+                    now_us,
+                    anomaly_state.as_ref(),
+                    &mut rng,
+                ));
             }
         }
 
         let payload = traces_to_otlp_payload(&spans);
-        post_otlp(&client, &api_url, Some(DEFAULT_STREAM_TRACES), &payload, spans.len(), &anomaly_state).await;
+        post_otlp(
+            &client,
+            &api_url,
+            Some(DEFAULT_STREAM_TRACES),
+            &payload,
+            spans.len(),
+            &anomaly_state,
+        )
+        .await;
     }
 }
 
@@ -1045,22 +1419,44 @@ async fn post_live<T: serde::Serialize>(
     records: &[T],
     anomaly_state: &Option<AnomalyState>,
 ) {
-    let anomaly_active = anomaly_state.as_ref().map(|a| a.is_active()).unwrap_or(false);
-    let anomaly_remaining = anomaly_state.as_ref().map(|a| a.remaining_secs).unwrap_or(0);
+    let anomaly_active = anomaly_state
+        .as_ref()
+        .map(|a| a.is_active())
+        .unwrap_or(false);
+    let anomaly_remaining = anomaly_state
+        .as_ref()
+        .map(|a| a.remaining_secs)
+        .unwrap_or(0);
 
-    match client.post(url).basic_auth(USERNAME, Some(PASSWORD)).json(records).send().await {
+    match client
+        .post(url)
+        .basic_auth(USERNAME, Some(PASSWORD))
+        .json(records)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             let suffix = if anomaly_active {
                 format!(" [ANOMALY ACTIVE: {}s remaining]", anomaly_remaining)
             } else {
                 String::new()
             };
-            println!("[{}] ✓ {} records{}", Utc::now().format("%Y-%m-%d %H:%M:%S"), records.len(), suffix);
+            println!(
+                "[{}] ✓ {} records{}",
+                Utc::now().format("%Y-%m-%d %H:%M:%S"),
+                records.len(),
+                suffix
+            );
         }
         Ok(resp) => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            eprintln!("[{}] ✗ HTTP {}: {}", Utc::now().format("%Y-%m-%d %H:%M:%S"), status, body);
+            eprintln!(
+                "[{}] ✗ HTTP {}: {}",
+                Utc::now().format("%Y-%m-%d %H:%M:%S"),
+                status,
+                body
+            );
         }
         Err(e) => {
             eprintln!("[{}] ✗ {}", Utc::now().format("%Y-%m-%d %H:%M:%S"), e);
@@ -1070,8 +1466,899 @@ async fn post_live<T: serde::Serialize>(
 
 fn print_anomaly_header(anomaly_state: &Option<AnomalyState>) {
     match anomaly_state {
-        Some(a) => println!("Anomaly: {} (10% chance/sec to trigger 2–5 min spike)", a.anomaly_type.label()),
+        Some(a) => println!(
+            "Anomaly: {} (10% chance/sec to trigger 2–5 min spike)",
+            a.anomaly_type.label()
+        ),
         None => println!("No anomaly injection. Add --anomaly <type> to inject."),
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Prod distributed traces — gRPC OTLP
+// ══════════════════════════════════════════════════════════════════════════════
+
+const GRPC_ENDPOINT: &str = "http://localhost:5081";
+
+// ── Span model ────────────────────────────────────────────────────────────────
+
+struct ProdSpan {
+    trace_id: Vec<u8>,
+    span_id: Vec<u8>,
+    parent_span_id: Vec<u8>,
+    service_name: &'static str,
+    namespace: &'static str,
+    operation: &'static str,
+    http_method: Option<&'static str>,
+    http_status: u32,
+    db_statement: Option<&'static str>,
+    db_system: Option<&'static str>,
+    start_ns: u64,
+    end_ns: u64,
+    status_code: i32, // 1=OK 2=ERROR
+    kind: i32,        // 2=SERVER 3=CLIENT
+}
+
+fn rspan_id(rng: &mut impl Rng) -> Vec<u8> {
+    (0..8).map(|_| rng.gen::<u8>()).collect()
+}
+fn rtrace_id(rng: &mut impl Rng) -> Vec<u8> {
+    (0..16).map(|_| rng.gen::<u8>()).collect()
+}
+
+fn lat(base_us: u64, jitter_us: u64, mult: f64, rng: &mut impl Rng) -> u64 {
+    ((base_us + rng.gen_range(0..=jitter_us)) as f64 * mult).max(1.0) as u64
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mk(
+    tid: Vec<u8>,
+    sid: Vec<u8>,
+    pid: Vec<u8>,
+    svc: &'static str,
+    ns: &'static str,
+    op: &'static str,
+    start_us: u64,
+    dur_us: u64,
+    kind: i32,
+    error: bool,
+    http_method: Option<&'static str>,
+    http_status: u32,
+    db_statement: Option<&'static str>,
+    db_system: Option<&'static str>,
+) -> ProdSpan {
+    ProdSpan {
+        trace_id: tid,
+        span_id: sid,
+        parent_span_id: pid,
+        service_name: svc,
+        namespace: ns,
+        operation: op,
+        http_method,
+        http_status: if error && http_method.is_some() {
+            500
+        } else {
+            http_status
+        },
+        db_statement,
+        db_system,
+        start_ns: start_us * 1000,
+        end_ns: (start_us + dur_us) * 1000,
+        status_code: if error { 2 } else { 1 },
+        kind,
+    }
+}
+
+// ── Flow: checkout ────────────────────────────────────────────────────────────
+// api-gateway → auth → cart → inventory → payment → order → notification
+
+fn flow_checkout(
+    tid: Vec<u8>,
+    base_us: u64,
+    lm: f64,
+    err: bool,
+    rng: &mut impl Rng,
+) -> Vec<ProdSpan> {
+    let mut out = Vec::new();
+    let mut t = base_us;
+
+    // root: api-gateway
+    let root_id = rspan_id(rng);
+    let root_dur = lat(600_000, 500_000, lm, rng);
+    let root_err = err && rng.gen_bool(0.45);
+    out.push(mk(
+        tid.clone(),
+        root_id.clone(),
+        vec![],
+        "api-gateway",
+        "gateway",
+        "POST /api/v1/checkout",
+        t,
+        root_dur,
+        2,
+        root_err,
+        Some("POST"),
+        200,
+        None,
+        None,
+    ));
+    t += 4_000;
+
+    // auth-service: validate JWT
+    let auth_id = rspan_id(rng);
+    let auth_dur = lat(22_000, 18_000, lm, rng);
+    out.push(mk(
+        tid.clone(),
+        auth_id.clone(),
+        root_id.clone(),
+        "auth-service",
+        "auth",
+        "ValidateJWT",
+        t,
+        auth_dur,
+        2,
+        false,
+        None,
+        0,
+        None,
+        None,
+    ));
+    // auth → redis session
+    out.push(mk(
+        tid.clone(),
+        rspan_id(rng),
+        auth_id,
+        "redis-cache",
+        "infra",
+        "GET session:*",
+        t + 1_000,
+        lat(1_500, 1_500, lm, rng),
+        3,
+        false,
+        None,
+        0,
+        Some("GET session:{token}"),
+        Some("redis"),
+    ));
+    t += auth_dur + 4_000;
+
+    // cart-service
+    let cart_id = rspan_id(rng);
+    let cache_hit = rng.gen_bool(0.45);
+    let cart_dur = if cache_hit {
+        lat(18_000, 8_000, lm, rng)
+    } else {
+        lat(55_000, 35_000, lm, rng)
+    };
+    out.push(mk(
+        tid.clone(),
+        cart_id.clone(),
+        root_id.clone(),
+        "cart-service",
+        "commerce",
+        "GetCart",
+        t,
+        cart_dur,
+        2,
+        false,
+        None,
+        0,
+        None,
+        None,
+    ));
+    let redis_dur = lat(1_500, 1_000, lm, rng);
+    out.push(mk(
+        tid.clone(),
+        rspan_id(rng),
+        cart_id.clone(),
+        "redis-cache",
+        "infra",
+        "GET cart:*",
+        t + 1_000,
+        redis_dur,
+        3,
+        false,
+        None,
+        0,
+        Some("GET cart:{user_id}"),
+        Some("redis"),
+    ));
+    if !cache_hit {
+        out.push(mk(
+            tid.clone(),
+            rspan_id(rng),
+            cart_id,
+            "postgres-primary",
+            "infra",
+            "SELECT cart_items",
+            t + redis_dur + 2_000,
+            lat(14_000, 10_000, lm, rng),
+            3,
+            false,
+            None,
+            0,
+            Some("SELECT * FROM cart_items WHERE user_id = $1"),
+            Some("postgresql"),
+        ));
+    }
+    t += cart_dur + 4_000;
+
+    // inventory-service
+    let inv_id = rspan_id(rng);
+    let inv_dur = lat(35_000, 25_000, lm, rng);
+    let inv_err = err && rng.gen_bool(0.2);
+    out.push(mk(
+        tid.clone(),
+        inv_id.clone(),
+        root_id.clone(),
+        "inventory-service",
+        "commerce",
+        "CheckStock",
+        t,
+        inv_dur,
+        2,
+        inv_err,
+        None,
+        0,
+        None,
+        None,
+    ));
+    out.push(mk(
+        tid.clone(),
+        rspan_id(rng),
+        inv_id,
+        "postgres-primary",
+        "infra",
+        "SELECT inventory",
+        t + 2_000,
+        lat(9_000, 7_000, lm, rng),
+        3,
+        false,
+        None,
+        0,
+        Some("SELECT qty FROM inventory WHERE sku = $1 FOR UPDATE"),
+        Some("postgresql"),
+    ));
+    t += inv_dur + 4_000;
+
+    // payment-service (most likely slow/fail)
+    let pay_id = rspan_id(rng);
+    let pay_dur = lat(140_000, 220_000, lm, rng);
+    let pay_err = err && rng.gen_bool(0.6);
+    out.push(mk(
+        tid.clone(),
+        pay_id.clone(),
+        root_id.clone(),
+        "payment-service",
+        "payments",
+        "ProcessPayment",
+        t,
+        pay_dur,
+        2,
+        pay_err,
+        Some("POST"),
+        200,
+        None,
+        None,
+    ));
+    out.push(mk(
+        tid.clone(),
+        rspan_id(rng),
+        pay_id,
+        "stripe-api",
+        "external",
+        "POST /v1/charges",
+        t + 5_000,
+        lat(110_000, 200_000, lm, rng),
+        3,
+        pay_err,
+        Some("POST"),
+        if pay_err { 402 } else { 200 },
+        None,
+        None,
+    ));
+    t += pay_dur + 4_000;
+
+    if !pay_err {
+        // order-service
+        let ord_id = rspan_id(rng);
+        let ord_dur = lat(55_000, 35_000, lm, rng);
+        out.push(mk(
+            tid.clone(),
+            ord_id.clone(),
+            root_id.clone(),
+            "order-service",
+            "commerce",
+            "CreateOrder",
+            t,
+            ord_dur,
+            2,
+            false,
+            None,
+            0,
+            None,
+            None,
+        ));
+        out.push(mk(
+            tid.clone(),
+            rspan_id(rng),
+            ord_id,
+            "postgres-primary",
+            "infra",
+            "INSERT orders",
+            t + 2_000,
+            lat(11_000, 8_000, lm, rng),
+            3,
+            false,
+            None,
+            0,
+            Some("INSERT INTO orders (user_id, items, total) VALUES ($1,$2,$3)"),
+            Some("postgresql"),
+        ));
+        t += ord_dur + 4_000;
+
+        // notification-service (async, not on critical path)
+        out.push(mk(
+            tid.clone(),
+            rspan_id(rng),
+            root_id.clone(),
+            "notification-service",
+            "notify",
+            "SendOrderConfirmation",
+            t,
+            lat(18_000, 12_000, 1.0, rng),
+            3,
+            false,
+            None,
+            0,
+            None,
+            None,
+        ));
+    }
+
+    out
+}
+
+// ── Flow: product-search ──────────────────────────────────────────────────────
+// api-gateway → search-service → [redis | product-catalog → postgres-replica]
+
+fn flow_search(
+    tid: Vec<u8>,
+    base_us: u64,
+    lm: f64,
+    err: bool,
+    rng: &mut impl Rng,
+) -> Vec<ProdSpan> {
+    let mut out = Vec::new();
+    let t = base_us;
+
+    let root_id = rspan_id(rng);
+    let cache_hit = rng.gen_bool(0.55);
+    let root_dur = if cache_hit {
+        lat(45_000, 25_000, lm, rng)
+    } else {
+        lat(120_000, 80_000, lm, rng)
+    };
+    out.push(mk(
+        tid.clone(),
+        root_id.clone(),
+        vec![],
+        "api-gateway",
+        "gateway",
+        "GET /api/v1/search",
+        t,
+        root_dur,
+        2,
+        false,
+        Some("GET"),
+        200,
+        None,
+        None,
+    ));
+
+    let srch_id = rspan_id(rng);
+    let srch_dur = if cache_hit {
+        lat(35_000, 15_000, lm, rng)
+    } else {
+        lat(100_000, 60_000, lm, rng)
+    };
+    let srch_err = err && rng.gen_bool(0.3);
+    out.push(mk(
+        tid.clone(),
+        srch_id.clone(),
+        root_id,
+        "search-service",
+        "search",
+        "Search",
+        t + 3_000,
+        srch_dur,
+        2,
+        srch_err,
+        None,
+        0,
+        None,
+        None,
+    ));
+
+    let redis_dur = lat(1_500, 1_000, lm, rng);
+    out.push(mk(
+        tid.clone(),
+        rspan_id(rng),
+        srch_id.clone(),
+        "redis-cache",
+        "infra",
+        "GET search:*",
+        t + 4_000,
+        redis_dur,
+        3,
+        false,
+        None,
+        0,
+        Some("GET search:{query_hash}"),
+        Some("redis"),
+    ));
+
+    if !cache_hit {
+        let cat_id = rspan_id(rng);
+        let cat_dur = lat(55_000, 40_000, lm, rng);
+        out.push(mk(
+            tid.clone(),
+            cat_id.clone(),
+            srch_id,
+            "product-catalog",
+            "catalog",
+            "ListProducts",
+            t + 4_000 + redis_dur + 2_000,
+            cat_dur,
+            2,
+            false,
+            None,
+            0,
+            None,
+            None,
+        ));
+        out.push(mk(tid.clone(), rspan_id(rng), cat_id,
+            "postgres-replica", "infra", "SELECT products",
+            t + 4_000 + redis_dur + 4_000, lat(18_000, 14_000, lm, rng), 3, false,
+            None, 0,
+            Some("SELECT id,name,price,stock FROM products WHERE tsv @@ plainto_tsquery($1) LIMIT 50"),
+            Some("postgresql")));
+    }
+
+    out
+}
+
+// ── Flow: login ───────────────────────────────────────────────────────────────
+// api-gateway → auth-service → user-service → postgres + redis (session write)
+
+fn flow_login(tid: Vec<u8>, base_us: u64, lm: f64, err: bool, rng: &mut impl Rng) -> Vec<ProdSpan> {
+    let mut out = Vec::new();
+    let t = base_us;
+
+    let root_id = rspan_id(rng);
+    let root_dur = lat(70_000, 50_000, lm, rng);
+    let login_err = err && rng.gen_bool(0.35);
+    out.push(mk(
+        tid.clone(),
+        root_id.clone(),
+        vec![],
+        "api-gateway",
+        "gateway",
+        "POST /api/v1/auth/login",
+        t,
+        root_dur,
+        2,
+        login_err,
+        Some("POST"),
+        if login_err { 401 } else { 200 },
+        None,
+        None,
+    ));
+
+    let auth_id = rspan_id(rng);
+    let auth_dur = lat(55_000, 35_000, lm, rng);
+    out.push(mk(
+        tid.clone(),
+        auth_id.clone(),
+        root_id,
+        "auth-service",
+        "auth",
+        "Login",
+        t + 3_000,
+        auth_dur,
+        2,
+        login_err,
+        None,
+        0,
+        None,
+        None,
+    ));
+
+    let usr_id = rspan_id(rng);
+    let usr_dur = lat(20_000, 12_000, lm, rng);
+    out.push(mk(
+        tid.clone(),
+        usr_id.clone(),
+        auth_id.clone(),
+        "user-service",
+        "users",
+        "GetUserByEmail",
+        t + 4_000,
+        usr_dur,
+        2,
+        false,
+        None,
+        0,
+        None,
+        None,
+    ));
+    out.push(mk(
+        tid.clone(),
+        rspan_id(rng),
+        usr_id,
+        "postgres-primary",
+        "infra",
+        "SELECT users",
+        t + 5_000,
+        lat(8_000, 6_000, lm, rng),
+        3,
+        false,
+        None,
+        0,
+        Some("SELECT id,email,password_hash,role FROM users WHERE email = $1"),
+        Some("postgresql"),
+    ));
+
+    if !login_err {
+        out.push(mk(
+            tid.clone(),
+            rspan_id(rng),
+            auth_id,
+            "redis-cache",
+            "infra",
+            "SET session:*",
+            t + 4_000 + usr_dur + 2_000,
+            lat(1_500, 1_000, lm, rng),
+            3,
+            false,
+            None,
+            0,
+            Some("SET session:{token} {user_json} EX 86400"),
+            Some("redis"),
+        ));
+    }
+
+    out
+}
+
+// ── Flow: browse-product ──────────────────────────────────────────────────────
+// api-gateway → product-catalog → [redis hit | postgres-replica]
+
+fn flow_browse(
+    tid: Vec<u8>,
+    base_us: u64,
+    lm: f64,
+    _err: bool,
+    rng: &mut impl Rng,
+) -> Vec<ProdSpan> {
+    let mut out = Vec::new();
+    let t = base_us;
+
+    let root_id = rspan_id(rng);
+    let cache_hit = rng.gen_bool(0.65);
+    let root_dur = if cache_hit {
+        lat(22_000, 10_000, lm, rng)
+    } else {
+        lat(65_000, 40_000, lm, rng)
+    };
+    out.push(mk(
+        tid.clone(),
+        root_id.clone(),
+        vec![],
+        "api-gateway",
+        "gateway",
+        "GET /api/v1/products/:id",
+        t,
+        root_dur,
+        2,
+        false,
+        Some("GET"),
+        200,
+        None,
+        None,
+    ));
+
+    let cat_id = rspan_id(rng);
+    let cat_dur = if cache_hit {
+        lat(14_000, 6_000, lm, rng)
+    } else {
+        lat(48_000, 28_000, lm, rng)
+    };
+    out.push(mk(
+        tid.clone(),
+        cat_id.clone(),
+        root_id,
+        "product-catalog",
+        "catalog",
+        "GetProduct",
+        t + 3_000,
+        cat_dur,
+        2,
+        false,
+        None,
+        0,
+        None,
+        None,
+    ));
+
+    let redis_dur = lat(1_500, 1_000, lm, rng);
+    out.push(mk(
+        tid.clone(),
+        rspan_id(rng),
+        cat_id.clone(),
+        "redis-cache",
+        "infra",
+        "GET product:*",
+        t + 4_000,
+        redis_dur,
+        3,
+        false,
+        None,
+        0,
+        Some("GET product:{id}"),
+        Some("redis"),
+    ));
+
+    if !cache_hit {
+        out.push(mk(
+            tid,
+            rspan_id(rng),
+            cat_id,
+            "postgres-replica",
+            "infra",
+            "SELECT product",
+            t + 4_000 + redis_dur + 2_000,
+            lat(10_000, 8_000, lm, rng),
+            3,
+            false,
+            None,
+            0,
+            Some("SELECT * FROM products WHERE id = $1"),
+            Some("postgresql"),
+        ));
+    }
+
+    out
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────────
+
+fn generate_prod_trace(
+    now_us: u64,
+    anomaly: Option<&AnomalyState>,
+    rng: &mut impl Rng,
+) -> Vec<ProdSpan> {
+    let tid = rtrace_id(rng);
+    let lm = if anomaly
+        .map(|a| matches!(a.anomaly_type, AnomalyType::Latency) && a.is_active())
+        .unwrap_or(false)
+    {
+        rng.gen_range(15.0_f64..40.0)
+    } else {
+        1.0
+    };
+    let err = anomaly
+        .map(|a| matches!(a.anomaly_type, AnomalyType::Errors) && a.is_active())
+        .unwrap_or(false);
+
+    // checkout 35% | search 30% | login 15% | browse 20%
+    match rng.gen_range(0u8..100) {
+        0..=34 => flow_checkout(tid, now_us, lm, err, rng),
+        35..=64 => flow_search(tid, now_us, lm, err, rng),
+        65..=79 => flow_login(tid, now_us, lm, err, rng),
+        _ => flow_browse(tid, now_us, lm, err, rng),
+    }
+}
+
+// ── Proto conversion ──────────────────────────────────────────────────────────
+
+fn kv_str(k: &str, v: &str) -> KeyValue {
+    KeyValue {
+        key: k.to_string(),
+        value: Some(AnyValue {
+            value: Some(Value::StringValue(v.to_string())),
+        }),
+    }
+}
+
+fn kv_int(k: &str, v: i64) -> KeyValue {
+    KeyValue {
+        key: k.to_string(),
+        value: Some(AnyValue {
+            value: Some(Value::IntValue(v)),
+        }),
+    }
+}
+
+fn prod_spans_to_resource_spans(spans: Vec<ProdSpan>) -> Vec<ResourceSpans> {
+    let mut by_svc: HashMap<String, Vec<Span>> = HashMap::new();
+
+    for s in &spans {
+        let mut attrs = vec![
+            kv_str("service.name", s.service_name),
+            kv_str("k8s.namespace.name", s.namespace),
+        ];
+        if let Some(m) = s.http_method {
+            attrs.push(kv_str("http.method", m));
+            if s.http_status > 0 {
+                attrs.push(kv_int("http.status_code", s.http_status as i64));
+            }
+        }
+        if let Some(stmt) = s.db_statement {
+            attrs.push(kv_str("db.statement", stmt));
+            if let Some(sys) = s.db_system {
+                attrs.push(kv_str("db.system", sys));
+            }
+        }
+
+        let proto_span = Span {
+            trace_id: s.trace_id.clone(),
+            span_id: s.span_id.clone(),
+            parent_span_id: s.parent_span_id.clone(),
+            name: s.operation.to_string(),
+            kind: s.kind,
+            start_time_unix_nano: s.start_ns,
+            end_time_unix_nano: s.end_ns,
+            attributes: attrs,
+            status: Some(Status {
+                code: s.status_code,
+                message: if s.status_code == 2 {
+                    "Internal Error".to_string()
+                } else {
+                    String::new()
+                },
+            }),
+            ..Default::default()
+        };
+        by_svc
+            .entry(s.service_name.to_string())
+            .or_default()
+            .push(proto_span);
+    }
+
+    by_svc
+        .into_iter()
+        .map(|(svc, proto_spans)| ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![kv_str("service.name", &svc)],
+                dropped_attributes_count: 0,
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "k8s-data-gen".to_string(),
+                    version: "0.1.0".to_string(),
+                    ..Default::default()
+                }),
+                spans: proto_spans,
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        })
+        .collect()
+}
+
+// ── gRPC client & send ────────────────────────────────────────────────────────
+
+async fn grpc_client(
+    endpoint: &str,
+) -> Result<TraceServiceClient<Channel>, Box<dyn std::error::Error>> {
+    let ch = Channel::from_shared(endpoint.to_string())?
+        .connect()
+        .await?;
+    Ok(TraceServiceClient::new(ch))
+}
+
+async fn send_grpc_traces(
+    client: &mut TraceServiceClient<Channel>,
+    resource_spans: Vec<ResourceSpans>,
+    org: &str,
+    stream_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", USERNAME, PASSWORD))
+    );
+    let mut req = tonic::Request::new(ExportTraceServiceRequest { resource_spans });
+    let md = req.metadata_mut();
+    md.insert("organization", org.parse()?);
+    md.insert("authorization", auth.parse()?);
+    md.insert("stream-name", stream_name.parse()?);
+    client.export(req).await?;
+    Ok(())
+}
+
+// ── Live gRPC traces ──────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn run_live_traces_grpc(
+    anomaly_type: Option<AnomalyType>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = grpc_client(GRPC_ENDPOINT).await?;
+    let mut rng = rand::thread_rng();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut anomaly_state = anomaly_type.map(AnomalyState::new);
+
+    println!(
+        "Live traces (gRPC OTLP) → {} [org: {}, stream: {}]",
+        GRPC_ENDPOINT, DEFAULT_ORG, DEFAULT_STREAM_TRACES
+    );
+    println!("Services: api-gateway, auth-service, cart-service, inventory-service,");
+    println!("          payment-service, order-service, product-catalog, search-service,");
+    println!("          notification-service, user-service, redis-cache, postgres-primary, postgres-replica");
+    println!("Flows: checkout(35%) | product-search(30%) | login(15%) | browse(20%)");
+    print_anomaly_header(&anomaly_state);
+    println!("Press Ctrl+C to stop.\n");
+
+    loop {
+        interval.tick().await;
+        if let Some(ref mut s) = anomaly_state {
+            s.tick(&mut rng);
+        }
+
+        let now_us = Utc::now().timestamp_micros() as u64;
+        let mut all_spans: Vec<ProdSpan> = Vec::new();
+        for _ in 0..10 {
+            all_spans.extend(generate_prod_trace(
+                now_us,
+                anomaly_state.as_ref(),
+                &mut rng,
+            ));
+        }
+
+        let span_count = all_spans.len();
+        let resource_spans = prod_spans_to_resource_spans(all_spans);
+
+        match send_grpc_traces(
+            &mut client,
+            resource_spans,
+            DEFAULT_ORG,
+            DEFAULT_STREAM_TRACES,
+        )
+        .await
+        {
+            Ok(_) => {
+                let anomaly_active = anomaly_state
+                    .as_ref()
+                    .map(|a| a.is_active())
+                    .unwrap_or(false);
+                let anomaly_remaining = anomaly_state
+                    .as_ref()
+                    .map(|a| a.remaining_secs)
+                    .unwrap_or(0);
+                let suffix = if anomaly_active {
+                    format!(" [ANOMALY ACTIVE: {}s remaining]", anomaly_remaining)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "[{}] ✓ {} spans (gRPC){}",
+                    Utc::now().format("%Y-%m-%d %H:%M:%S"),
+                    span_count,
+                    suffix
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[{}] ✗ gRPC error: {}",
+                    Utc::now().format("%Y-%m-%d %H:%M:%S"),
+                    e
+                );
+                // attempt reconnect
+                if let Ok(new_client) = grpc_client(GRPC_ENDPOINT).await {
+                    client = new_client;
+                }
+            }
+        }
     }
 }
 
@@ -1087,24 +2374,28 @@ fn main() {
 
     match args[1].as_str() {
         "historical" => {
-            let days   = parse_flag_u32(&args, "--days").unwrap_or(7);
+            let days = parse_flag_u32(&args, "--days").unwrap_or(7);
             let stream = parse_flag_str(&args, "--stream").unwrap_or_else(|| "logs".to_string());
 
             let result = match stream.as_str() {
-                "logs"    => run_historical_logs(days),
+                "logs" => run_historical_logs(days),
                 "metrics" => run_historical_metrics(days),
-                "traces"  => run_historical_traces(days),
-                "all" => {
-                    run_historical_logs(days)
-                        .and_then(|_| run_historical_metrics(days))
-                        .and_then(|_| run_historical_traces(days))
-                }
+                "traces" => run_historical_traces(days),
+                "all" => run_historical_logs(days)
+                    .and_then(|_| run_historical_metrics(days))
+                    .and_then(|_| run_historical_traces(days)),
                 other => {
-                    eprintln!("Unknown stream '{}'. Valid: logs, metrics, traces, all", other);
+                    eprintln!(
+                        "Unknown stream '{}'. Valid: logs, metrics, traces, all",
+                        other
+                    );
                     std::process::exit(1);
                 }
             };
-            if let Err(e) = result { eprintln!("Error: {}", e); std::process::exit(1); }
+            if let Err(e) = result {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "ingest" => {
             let file_path = if args.len() > 2 && !args[2].starts_with("--") {
@@ -1112,15 +2403,19 @@ fn main() {
             } else {
                 "../output_k8s.json"
             };
-            let org    = parse_flag_str(&args, "--org").unwrap_or_else(|| DEFAULT_ORG.to_string());
-            let stream = parse_flag_str(&args, "--stream").unwrap_or_else(|| DEFAULT_STREAM_LOGS.to_string());
+            let org = parse_flag_str(&args, "--org").unwrap_or_else(|| DEFAULT_ORG.to_string());
+            let stream = parse_flag_str(&args, "--stream")
+                .unwrap_or_else(|| DEFAULT_STREAM_LOGS.to_string());
             if let Err(e) = run_ingest(file_path, &org, &stream) {
-                eprintln!("Error: {}", e); std::process::exit(1);
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
             }
         }
         "live" => {
             let stream = parse_flag_str(&args, "--stream").unwrap_or_else(|| "logs".to_string());
-            let anomaly_type = parse_flag_str(&args, "--anomaly").and_then(|s| AnomalyType::from_str(&s));
+            let anomaly_type =
+                parse_flag_str(&args, "--anomaly").and_then(|s| AnomalyType::from_str(&s));
+            let use_grpc = args.contains(&"--grpc".to_string());
 
             if let Some(ref s) = parse_flag_str(&args, "--anomaly") {
                 if AnomalyType::from_str(s).is_none() {
@@ -1130,23 +2425,34 @@ fn main() {
             }
 
             let result = match stream.as_str() {
-                "logs"    => run_live_logs(anomaly_type),
+                "logs" => run_live_logs(anomaly_type),
                 "metrics" => run_live_metrics(anomaly_type),
-                "traces"  => run_live_traces(anomaly_type),
+                "traces" if use_grpc => run_live_traces_grpc(anomaly_type),
+                "traces" => run_live_traces(anomaly_type),
                 other => {
                     eprintln!("Unknown stream '{}'. Valid: logs, metrics, traces", other);
                     std::process::exit(1);
                 }
             };
-            if let Err(e) = result { eprintln!("Error: {}", e); std::process::exit(1); }
+            if let Err(e) = result {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
-        "help" | "--help" | "-h" => { print_usage(); }
-        _ => { print_usage(); std::process::exit(1); }
+        "help" | "--help" | "-h" => {
+            print_usage();
+        }
+        _ => {
+            print_usage();
+            std::process::exit(1);
+        }
     }
 }
 
 fn parse_flag_u32(args: &[String], flag: &str) -> Option<u32> {
-    args.windows(2).find(|w| w[0] == flag).and_then(|w| w[1].parse().ok())
+    args.windows(2)
+        .find(|w| w[0] == flag)
+        .and_then(|w| w[1].parse().ok())
 }
 
 fn parse_flag_str(args: &[String], flag: &str) -> Option<String> {
@@ -1186,7 +2492,9 @@ fn print_usage() {
     println!("  cargo run -- ingest ../output_k8s_traces.json --stream k8s_traces");
     println!("  cargo run -- live --stream metrics --anomaly cpu");
     println!("  cargo run -- live --stream traces --anomaly latency");
-    println!("  cargo run -- live --stream logs --anomaly login\n");
+    println!("  cargo run -- live --stream logs --anomaly login");
+    println!("  cargo run -- live --stream traces --grpc                   (prod services via gRPC OTLP → port 5081)");
+    println!("  cargo run -- live --stream traces --grpc --anomaly latency\n");
     println!("ANOMALY DETECTION CONFIGS (stream → type → detection_function):");
     println!("  Logs/CPU:           k8s_logs    → logs    → custom SQL AVG(cpu_millicores)");
     println!("  Logs/Errors:        k8s_logs    → logs    → count(*) filter log_level=ERROR");

@@ -5,14 +5,16 @@ Kubernetes observability data generator for OpenObserve anomaly detection testin
 Generates realistic K8s **logs**, **metrics**, and **traces** (10 pods across 5 namespaces) with:
 - **historical** — write N days of data to a JSON file, then bulk ingest
 - **live** — stream records to OpenObserve in real-time with optional anomaly injection
+- **live --grpc** — stream prod-level distributed traces via gRPC OTLP (port 5081)
 
-Each stream type uses the correct OpenObserve ingestion API:
+Ingestion APIs:
 
-| Stream | API endpoint | OpenObserve stream type |
-|--------|-------------|------------------------|
-| `k8s_logs` | `POST /_json` | `logs` |
-| metrics fields | `POST /v1/metrics` (OTLP) | `metrics` (one stream per field) |
-| `k8s_traces` | `POST /v1/traces` (OTLP) | `traces` |
+| Stream | API endpoint | Protocol | OpenObserve stream type |
+|--------|-------------|----------|------------------------|
+| `k8s_logs` | `POST /_json` | HTTP | `logs` |
+| metrics fields | `POST /v1/metrics` | HTTP OTLP | `metrics` (one stream per field) |
+| `k8s_traces` | `POST /v1/traces` | HTTP OTLP | `traces` |
+| `k8s_traces` | `TraceService/Export` | **gRPC OTLP** port 5081 | `traces` |
 
 ```bash
 cargo run -- help
@@ -23,31 +25,46 @@ cargo run -- help
 ## Quick Commands
 
 ```bash
-# Generate 7 days historical data (all streams)
-cargo run --release -- historical --days 7 --stream all
+# Build
+make build
 
-# Ingest all three streams
-cargo run --release -- ingest ../output_k8s.json                                    # logs  → k8s_logs (/_json)
-cargo run --release -- ingest ../output_k8s_metrics.json --stream k8s_metrics       # metrics → OTLP /v1/metrics
-cargo run --release -- ingest ../output_k8s_traces.json  --stream k8s_traces        # traces  → OTLP /v1/traces
+# Live streams (HTTP)
+make live-logs
+make live-metrics
+make live-traces
 
-# Live ingestion (background all three)
-cargo run --release -- live --stream logs    &
-cargo run --release -- live --stream metrics &
-cargo run --release -- live --stream traces  &
+# Live prod traces via gRPC (port 5081) ← new
+make live-traces-grpc
 
 # Live with anomaly injection
+make live-traces-grpc-latency
+make live-traces-grpc-errors
+make live-logs-cpu
+make live-metrics-latency
+
+# Historical + ingest
+make historical
+make ingest-all
+
+# See all targets
+make help
+```
+
+Or with cargo directly:
+
+```bash
+# gRPC prod traces — 13 services, 4 flow types, continuous
+cargo run --release -- live --stream traces --grpc
+cargo run --release -- live --stream traces --grpc --anomaly latency
+cargo run --release -- live --stream traces --grpc --anomaly errors
+
+# HTTP traces (simple K8s spans)
+cargo run --release -- live --stream traces
+cargo run --release -- live --stream traces --anomaly latency
+
+# Logs + metrics
 cargo run --release -- live --stream logs    --anomaly cpu
-cargo run --release -- live --stream logs    --anomaly memory
-cargo run --release -- live --stream logs    --anomaly errors
-cargo run --release -- live --stream logs    --anomaly restarts
-cargo run --release -- live --stream logs    --anomaly latency
-cargo run --release -- live --stream logs    --anomaly login
-cargo run --release -- live --stream metrics --anomaly cpu
 cargo run --release -- live --stream metrics --anomaly memory
-cargo run --release -- live --stream metrics --anomaly latency
-cargo run --release -- live --stream traces  --anomaly latency
-cargo run --release -- live --stream traces  --anomaly errors
 ```
 
 ---
@@ -151,39 +168,61 @@ cargo run -- ingest ../output_k8s.json --org myorg --stream k8s_logs
 
 Streams ~10 records/sec to OpenObserve. Add `--anomaly` to inject spikes.
 
-| `--stream` | Endpoint | Stream type |
-|------------|----------|-------------|
-| `logs` (default) | `POST /k8s_logs/_json` | `logs` |
-| `metrics` | `POST /v1/metrics` (OTLP) | `metrics` (per-field) |
-| `traces` | `POST /v1/traces` (OTLP) | `traces` → `k8s_traces` |
+| `--stream` | `--grpc` | Endpoint | Stream type |
+|------------|----------|----------|-------------|
+| `logs` (default) | — | `POST /k8s_logs/_json` | `logs` |
+| `metrics` | — | `POST /v1/metrics` OTLP HTTP | `metrics` (per-field) |
+| `traces` | — | `POST /v1/traces` OTLP HTTP | `traces` → `k8s_traces` |
+| `traces` | ✓ | gRPC `TraceService/Export` port **5081** | `traces` → `k8s_traces` |
 
 ```bash
-cargo run -- live [--stream logs|metrics|traces] [--anomaly TYPE]
+cargo run -- live [--stream logs|metrics|traces] [--grpc] [--anomaly TYPE]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--stream` | `logs` | Which stream type to generate |
-| `--anomaly` | none | Anomaly type to inject (see table below) |
+| `--stream` | `logs` | Which stream type |
+| `--grpc` | off | Use gRPC OTLP instead of HTTP (traces only) |
+| `--anomaly` | none | Anomaly type to inject |
+
+#### gRPC prod traces (`--grpc`)
+
+Uses a realistic 13-service microservice topology instead of the simple K8s pod spans. Sends to `localhost:5081`.
+
+**Services:** `api-gateway`, `auth-service`, `user-service`, `cart-service`, `inventory-service`, `payment-service`, `order-service`, `product-catalog`, `search-service`, `notification-service`, `redis-cache`, `postgres-primary`, `postgres-replica`
+
+**Flow types** (weighted per tick):
+
+| Flow | Weight | Services | Spans |
+|------|--------|----------|-------|
+| checkout | 35% | gateway → auth → cart → inventory → payment → order → notify | 8–11 |
+| product-search | 30% | gateway → search → [redis \| catalog → replica] | 4–6 |
+| login | 15% | gateway → auth → user-service → postgres + redis | 4–5 |
+| browse | 20% | gateway → catalog → [redis \| replica] | 3–4 |
 
 ```bash
-# Normal live streams
-cargo run -- live                             # logs, no anomaly
-cargo run -- live --stream metrics            # metrics (OTLP), no anomaly
-cargo run -- live --stream traces             # traces (OTLP), no anomaly
+# gRPC prod traces
+cargo run -- live --stream traces --grpc
+cargo run -- live --stream traces --grpc --anomaly latency   # 15–40x duration spike
+cargo run -- live --stream traces --grpc --anomaly errors    # payment/auth failures
 
-# Live with anomaly injection
+# HTTP traces (simple K8s spans)
+cargo run -- live --stream traces
+cargo run -- live --stream traces --anomaly latency
+cargo run -- live --stream traces --anomaly errors
+
+# Logs
 cargo run -- live --stream logs    --anomaly cpu
 cargo run -- live --stream logs    --anomaly memory
 cargo run -- live --stream logs    --anomaly errors
 cargo run -- live --stream logs    --anomaly restarts
 cargo run -- live --stream logs    --anomaly latency
 cargo run -- live --stream logs    --anomaly login
+
+# Metrics
 cargo run -- live --stream metrics --anomaly cpu
 cargo run -- live --stream metrics --anomaly memory
 cargo run -- live --stream metrics --anomaly latency
-cargo run -- live --stream traces  --anomaly latency
-cargo run -- live --stream traces  --anomaly errors
 ```
 
 **Anomaly injection behavior:**
@@ -434,6 +473,42 @@ cargo run -- ingest ../output_k8s_traces.json  --stream k8s_traces    # OTLP tra
 }
 ```
 
+#### Prod gRPC Traces — payment-service latency (`--grpc --anomaly latency`)
+```json
+{
+  "name": "payment-service Latency",
+  "stream_name": "k8s_traces", "stream_type": "traces",
+  "query_mode": "custom_sql",
+  "custom_sql": "SELECT histogram(_timestamp,'5 minute') AS zo_sql_time, AVG(duration_ms) AS zo_sql_val FROM \"k8s_traces\" WHERE service_name='payment-service' GROUP BY zo_sql_time ORDER BY zo_sql_time",
+  "histogram_interval": "5m", "threshold": 97
+}
+```
+
+#### Prod gRPC Traces — end-to-end checkout latency
+```json
+{
+  "name": "Checkout E2E Latency",
+  "stream_name": "k8s_traces", "stream_type": "traces",
+  "query_mode": "custom_sql",
+  "custom_sql": "SELECT histogram(_timestamp,'5 minute') AS zo_sql_time, AVG(duration_ms) AS zo_sql_val FROM \"k8s_traces\" WHERE service_name='api-gateway' AND operation_name='POST /api/v1/checkout' GROUP BY zo_sql_time ORDER BY zo_sql_time",
+  "histogram_interval": "5m", "threshold": 97
+}
+```
+
+#### Prod gRPC Traces — payment error rate (`--grpc --anomaly errors`)
+```json
+{
+  "name": "payment-service Error Rate",
+  "stream_name": "k8s_traces", "stream_type": "traces",
+  "query_mode": "filters",
+  "filters": [
+    {"field": "service_name", "operator": "=", "value": "payment-service"},
+    {"field": "status",       "operator": "=", "value": "ERROR"}
+  ],
+  "detection_function": "count(*)", "histogram_interval": "5m", "threshold": 97
+}
+```
+
 ### Step 3 — Train models
 
 Use the OpenObserve UI "Re-train" button, or via API:
@@ -448,6 +523,10 @@ curl -X PATCH "http://localhost:5080/api/v1/default/anomaly_detection/<config_id
 cargo run -- live --stream logs    --anomaly cpu
 cargo run -- live --stream metrics --anomaly latency
 cargo run -- live --stream traces  --anomaly errors
+
+# Prod gRPC traces with anomalies
+cargo run -- live --stream traces --grpc --anomaly latency
+cargo run -- live --stream traces --grpc --anomaly errors
 ```
 
 Then query the `_anomalies` stream in OpenObserve:
@@ -466,9 +545,10 @@ Edit constants at the top of `src/main.rs`:
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `API_BASE` | `http://localhost:5080` | OpenObserve base URL |
+| `API_BASE` | `http://localhost:5080` | OpenObserve HTTP base URL |
+| `GRPC_ENDPOINT` | `http://localhost:5081` | OpenObserve gRPC endpoint |
 | `DEFAULT_ORG` | `default` | Default org ID |
 | `USERNAME` | `root@example.com` | Auth username |
 | `PASSWORD` | `Complexpass#123` | Auth password |
 | `INTERVAL_SECONDS` | `10` | Seconds between records per pod (historical) |
-| `PODS_PER_TICK` | `10` | Records sent per second (live) |
+| `PODS_PER_TICK` | `10` | Records per tick (live HTTP) |

@@ -47,10 +47,13 @@ struct EnrichedRecord {
 }
 
 const API_URL: &str = "http://localhost:5080/api/default/test1/_json";
-// const API_URL: &str = "https://dev3.internal.zinclabs.dev/api/default/olympics/_json";
+// const API_URL: &str = "https://monitor.internal.zinclabs.dev/api/otlp-production/oly1/_json";
+// const API_URL: &str = "https://dev2.internal.zinclabs.dev/api/default/oly121/_json";
 const USERNAME: &str = "root@example.com";
 const PASSWORD: &str = "Complexpass#123";
 // const PASSWORD: &str = "ac0dcdf1c5a1183bd78a9bdb67e18406";
+// const USERNAME: &str = "root@monitor1.com";
+// const PASSWORD: &str = "SecTest@700";
 const RECORDS_PER_SECOND: usize = 2;
 
 // cargo r -- no-fts
