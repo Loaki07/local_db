@@ -4,7 +4,7 @@ use chrono::Utc;
 use reqwest::Client;
 
 use crate::anomaly::AnomalyState;
-use crate::config::{PASSWORD, USERNAME};
+use crate::config::{password, username};
 
 pub async fn post_live<T: serde::Serialize>(
     client: &Client,
@@ -23,7 +23,7 @@ pub async fn post_live<T: serde::Serialize>(
 
     match client
         .post(url)
-        .basic_auth(USERNAME, Some(PASSWORD))
+        .basic_auth(username(), Some(password()))
         .json(records)
         .send()
         .await
@@ -74,7 +74,7 @@ pub async fn post_otlp(
 
     let builder = client
         .post(url)
-        .basic_auth(USERNAME, Some(PASSWORD))
+        .basic_auth(username(), Some(password()))
         .json(body);
     let builder = match stream_name {
         Some(name) => builder.header("stream-name", name),

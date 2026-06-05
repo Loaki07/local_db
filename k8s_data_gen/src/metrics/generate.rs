@@ -56,6 +56,14 @@ pub fn generate_metric_record(
     let net_rx = (rps as u64).saturating_mul(rng.gen_range(800..1200));
     let net_tx = (rps as u64).saturating_mul(rng.gen_range(400..800));
 
+    // cumulative CPU time: base offset + elapsed seconds * cpu rate
+    // gives a realistic monotonically increasing value across ticks
+    let epoch_secs = timestamp_us / 1_000_000;
+    let cpu_rate = cpu_mc as f64 / 1000.0; // cores
+    let base_offset = (pod_idx as f64 * 1000.0) + 10.0;
+    let container_cpu_time = ((base_offset + epoch_secs as f64 * cpu_rate) * 1000.0).round() / 1000.0;
+    let container_id = format!("{:016x}{:016x}", pod_idx as u64 * 0xdeadbeef, epoch_secs as u64);
+
     K8sMetricRecord {
         _timestamp: timestamp_us,
         cluster: cluster.to_string(),
@@ -73,5 +81,8 @@ pub fn generate_metric_record(
         request_latency_ms: (latency * 10.0).round() / 10.0,
         error_rate: (error_rate * 10000.0).round() / 10000.0,
         restarts,
+        container_cpu_time,
+        container_id,
+        total_payment_req: (rps * season * rng.gen_range(0.8..1.2) * 10.0).round() as u64,
     }
 }

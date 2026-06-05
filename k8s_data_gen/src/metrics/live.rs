@@ -7,13 +7,13 @@ use super::generate::generate_metric_record;
 use super::otlp::metrics_to_otlp_payload;
 use crate::anomaly::{AnomalyState, AnomalyType};
 use crate::client::http::post_otlp;
-use crate::config::{API_BASE, DEFAULT_ORG, PODS_PER_TICK};
+use crate::config::{api_base, DEFAULT_ORG, PODS_PER_TICK};
 use crate::utils::print_anomaly_header;
 
 pub async fn run_live_metrics(
     anomaly_type: Option<AnomalyType>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let api_url = format!("{}/api/{}/v1/metrics", API_BASE, DEFAULT_ORG);
+    let api_url = format!("{}/api/{}/v1/metrics", api_base(), DEFAULT_ORG);
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .build()?;

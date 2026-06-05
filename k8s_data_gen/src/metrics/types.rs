@@ -18,4 +18,7 @@ pub struct K8sMetricRecord {
     pub request_latency_ms: f64,
     pub error_rate: f64,
     pub restarts: u32,
+    pub container_cpu_time: f64, // cumulative CPU time in seconds
+    pub container_id: String,
+    pub total_payment_req: u64,
 }

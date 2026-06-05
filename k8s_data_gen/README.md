@@ -1,5 +1,36 @@
 # k8s_data_gen
 
+**TL;DR**
+
+```bash
+# Build
+cargo build --release
+
+# Stream live (logs / metrics / traces)
+cargo run --release -- live --stream logs
+cargo run --release -- live --stream metrics
+cargo run --release -- live --stream traces
+cargo run --release -- live --stream traces --grpc     # gRPC OTLP port 5081
+
+# Inject anomalies
+cargo run --release -- live --stream logs    --anomaly cpu
+cargo run --release -- live --stream traces  --grpc --anomaly latency
+
+# Bulk historical → ingest
+cargo run --release -- historical --days 7 --stream all
+cargo run --release -- ingest ../output_k8s.json
+cargo run --release -- ingest ../output_k8s_metrics.json --stream k8s_metrics
+cargo run --release -- ingest ../output_k8s_traces.json  --stream k8s_traces
+
+# Custom endpoint / credentials via env vars
+O2_API_BASE=http://my-host:5080 \
+O2_GRPC_ENDPOINT=http://my-host:5081 \
+O2_USERNAME=me@example.com O2_PASSWORD=secret \
+  cargo run --release -- live --stream traces --grpc
+```
+
+---
+
 Kubernetes observability data generator for OpenObserve anomaly detection testing.
 
 Generates realistic K8s **logs**, **metrics**, and **traces** (10 pods across 5 namespaces) with:
@@ -541,14 +572,14 @@ LIMIT 50
 
 ## Config
 
-Edit constants at the top of `src/main.rs`:
+Override via env vars at runtime, or edit constants in `src/config.rs`:
 
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `API_BASE` | `http://localhost:5080` | OpenObserve HTTP base URL |
-| `GRPC_ENDPOINT` | `http://localhost:5081` | OpenObserve gRPC endpoint |
-| `DEFAULT_ORG` | `default` | Default org ID |
-| `USERNAME` | `root@example.com` | Auth username |
-| `PASSWORD` | `Complexpass#123` | Auth password |
-| `INTERVAL_SECONDS` | `10` | Seconds between records per pod (historical) |
-| `PODS_PER_TICK` | `10` | Records per tick (live HTTP) |
+| Env var | Constant | Default | Description |
+|---------|----------|---------|-------------|
+| `O2_API_BASE` | `DEFAULT_API_BASE` | `http://localhost:5080` | OpenObserve HTTP base URL |
+| `O2_GRPC_ENDPOINT` | `DEFAULT_GRPC_ENDPOINT` | `http://localhost:5081` | OpenObserve gRPC endpoint |
+| `O2_USERNAME` | `USERNAME` | `root@example.com` | Auth username |
+| `O2_PASSWORD` | `PASSWORD` | `Complexpass#123` | Auth password |
+| — | `DEFAULT_ORG` | `default` | Default org ID |
+| — | `INTERVAL_SECONDS` | `10` | Seconds between records per pod (historical) |
+| — | `PODS_PER_TICK` | `10` | Records per tick (live HTTP) |

@@ -5,7 +5,7 @@ use opentelemetry_proto::tonic::{
 };
 use tonic::transport::Channel;
 
-use crate::config::{PASSWORD, USERNAME};
+use crate::config::{password, username};
 
 pub async fn grpc_client(
     endpoint: &str,
@@ -29,7 +29,7 @@ pub async fn send_grpc_traces(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let auth = format!(
         "Basic {}",
-        base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", USERNAME, PASSWORD))
+        base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", username(), password()))
     );
     let mut req = tonic::Request::new(ExportTraceServiceRequest { resource_spans });
     let md = req.metadata_mut();

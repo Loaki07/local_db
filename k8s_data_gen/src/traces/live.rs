@@ -9,13 +9,13 @@ use super::otlp::{prod_spans_to_resource_spans, traces_to_otlp_payload};
 use crate::anomaly::{AnomalyState, AnomalyType};
 use crate::client::grpc::{grpc_client, send_grpc_traces};
 use crate::client::http::post_otlp;
-use crate::config::{API_BASE, DEFAULT_ORG, DEFAULT_STREAM_TRACES, GRPC_ENDPOINT, PODS_PER_TICK};
+use crate::config::{api_base, grpc_endpoint, DEFAULT_ORG, DEFAULT_STREAM_TRACES, PODS_PER_TICK};
 use crate::utils::print_anomaly_header;
 
 pub async fn run_live_traces(
     anomaly_type: Option<AnomalyType>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let api_url = format!("{}/api/{}/v1/traces", API_BASE, DEFAULT_ORG);
+    let api_url = format!("{}/api/{}/v1/traces", api_base(), DEFAULT_ORG);
     let client = Client::builder()
         .danger_accept_invalid_certs(true)
         .build()?;
@@ -65,14 +65,14 @@ pub async fn run_live_traces(
 pub async fn run_live_traces_grpc(
     anomaly_type: Option<AnomalyType>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = grpc_client(GRPC_ENDPOINT).await?;
+    let mut client = grpc_client(&grpc_endpoint()).await?;
     let mut rng = rand::thread_rng();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut anomaly_state = anomaly_type.map(AnomalyState::new);
 
     println!(
         "Live traces (gRPC OTLP) → {} [org: {}, stream: {}]",
-        GRPC_ENDPOINT, DEFAULT_ORG, DEFAULT_STREAM_TRACES
+        &grpc_endpoint(), DEFAULT_ORG, DEFAULT_STREAM_TRACES
     );
     println!("Services: api-gateway, auth-service, cart-service, inventory-service,");
     println!("          payment-service, order-service, product-catalog, search-service,");
@@ -135,7 +135,7 @@ pub async fn run_live_traces_grpc(
                     Utc::now().format("%Y-%m-%d %H:%M:%S"),
                     e
                 );
-                if let Ok(new_client) = grpc_client(GRPC_ENDPOINT).await {
+                if let Ok(new_client) = grpc_client(&grpc_endpoint()).await {
                     client = new_client;
                 }
             }

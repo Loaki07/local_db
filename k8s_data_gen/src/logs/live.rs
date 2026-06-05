@@ -7,7 +7,7 @@ use super::generate::generate_log_record;
 use super::types::LOGIN_ERROR_BACKGROUND_PROB;
 use crate::anomaly::{AnomalyState, AnomalyType};
 use crate::client::http::post_live;
-use crate::config::{API_BASE, DEFAULT_ORG, DEFAULT_STREAM_LOGS, PODS_PER_TICK};
+use crate::config::{api_base, DEFAULT_ORG, DEFAULT_STREAM_LOGS, PODS_PER_TICK};
 use crate::utils::print_anomaly_header;
 
 pub async fn run_live_logs(
@@ -15,7 +15,7 @@ pub async fn run_live_logs(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_url = format!(
         "{}/api/{}/{}/_json",
-        API_BASE, DEFAULT_ORG, DEFAULT_STREAM_LOGS
+        api_base(), DEFAULT_ORG, DEFAULT_STREAM_LOGS
     );
     let client = Client::builder()
         .danger_accept_invalid_certs(true)

@@ -1,4 +1,5 @@
-pub const API_BASE: &str = "http://localhost:5080";
+pub const DEFAULT_API_BASE: &str = "http://localhost:5080";
+pub const DEFAULT_GRPC_ENDPOINT: &str = "http://localhost:5081";
 pub const DEFAULT_ORG: &str = "default";
 pub const DEFAULT_STREAM_LOGS: &str = "k8s_logs";
 pub const DEFAULT_STREAM_METRICS: &str = "k8s_metrics";
@@ -9,5 +10,20 @@ pub const INTERVAL_SECONDS: i64 = 10;
 pub const PODS_PER_TICK: usize = 10;
 pub const CHUNK_SIZE: usize = 5_000;
 pub const INGEST_BATCH_SIZE: usize = 2_000;
-pub const GRPC_ENDPOINT: &str = "http://localhost:5081";
 pub const NODE_MEMORY_MB: f64 = 4096.0;
+
+pub fn api_base() -> String {
+    std::env::var("O2_API_BASE").unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
+}
+
+pub fn grpc_endpoint() -> String {
+    std::env::var("O2_GRPC_ENDPOINT").unwrap_or_else(|_| DEFAULT_GRPC_ENDPOINT.to_string())
+}
+
+pub fn username() -> String {
+    std::env::var("O2_USERNAME").unwrap_or_else(|_| USERNAME.to_string())
+}
+
+pub fn password() -> String {
+    std::env::var("O2_PASSWORD").unwrap_or_else(|_| PASSWORD.to_string())
+}

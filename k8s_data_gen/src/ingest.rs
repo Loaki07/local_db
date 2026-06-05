@@ -1,7 +1,7 @@
 use reqwest::Client;
 
 use crate::client::http::stream_json_array;
-use crate::config::{API_BASE, DEFAULT_STREAM_TRACES, INGEST_BATCH_SIZE, PASSWORD, USERNAME};
+use crate::config::{api_base, password, username, DEFAULT_STREAM_TRACES, INGEST_BATCH_SIZE};
 use crate::metrics::{otlp::metrics_to_otlp_payload, types::K8sMetricRecord};
 use crate::traces::{otlp::traces_to_otlp_payload, types::K8sTraceRecord};
 
@@ -21,7 +21,7 @@ pub async fn run_ingest(
 
     match stream {
         "k8s_metrics" => {
-            let url = format!("{}/api/{}/v1/metrics", API_BASE, org);
+            let url = format!("{}/api/{}/v1/metrics", api_base(), org);
             println!("  URL:    {} (OTLP metrics)", url);
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<K8sMetricRecord>>(4);
@@ -31,7 +31,7 @@ pub async fn run_ingest(
                 let payload = metrics_to_otlp_payload(&batch);
                 let resp = client
                     .post(&url)
-                    .basic_auth(USERNAME, Some(PASSWORD))
+                    .basic_auth(username(), Some(password()))
                     .json(&payload)
                     .send()
                     .await?;
@@ -49,7 +49,7 @@ pub async fn run_ingest(
         }
 
         "k8s_traces" => {
-            let url = format!("{}/api/{}/v1/traces", API_BASE, org);
+            let url = format!("{}/api/{}/v1/traces", api_base(), org);
             println!(
                 "  URL:    {} (OTLP traces, stream-name: {})",
                 url, DEFAULT_STREAM_TRACES
@@ -62,7 +62,7 @@ pub async fn run_ingest(
                 let payload = traces_to_otlp_payload(&batch);
                 let resp = client
                     .post(&url)
-                    .basic_auth(USERNAME, Some(PASSWORD))
+                    .basic_auth(username(), Some(password()))
                     .header("stream-name", DEFAULT_STREAM_TRACES)
                     .json(&payload)
                     .send()
@@ -84,7 +84,7 @@ pub async fn run_ingest(
         }
 
         _ => {
-            let url = format!("{}/api/{}/{}/_json", API_BASE, org, stream);
+            let url = format!("{}/api/{}/{}/_json", api_base(), org, stream);
             println!("  URL:    {}", url);
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<serde_json::Value>>(4);
@@ -97,7 +97,7 @@ pub async fn run_ingest(
             while let Some(batch) = rx.recv().await {
                 let resp = client
                     .post(&url)
-                    .basic_auth(USERNAME, Some(PASSWORD))
+                    .basic_auth(username(), Some(password()))
                     .json(&batch)
                     .send()
                     .await?;
