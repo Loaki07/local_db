@@ -1,0 +1,13 @@
+pub const API_BASE: &str = "http://localhost:5080";
+pub const DEFAULT_ORG: &str = "default";
+pub const DEFAULT_STREAM_LOGS: &str = "k8s_logs";
+pub const DEFAULT_STREAM_METRICS: &str = "k8s_metrics";
+pub const DEFAULT_STREAM_TRACES: &str = "k8s_traces_grpc";
+pub const USERNAME: &str = "root@example.com";
+pub const PASSWORD: &str = "Complexpass#123";
+pub const INTERVAL_SECONDS: i64 = 10;
+pub const PODS_PER_TICK: usize = 10;
+pub const CHUNK_SIZE: usize = 5_000;
+pub const INGEST_BATCH_SIZE: usize = 2_000;
+pub const GRPC_ENDPOINT: &str = "http://localhost:5081";
+pub const NODE_MEMORY_MB: f64 = 4096.0;

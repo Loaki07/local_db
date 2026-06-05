@@ -2,6 +2,11 @@
 name = "k8s_data_gen"
 version = "0.1.0"
 edition = "2021"
+default-run = "k8s_data_gen"
+
+[[bin]]
+name = "histogram_edge_sim"
+path = "src/histogram_edge_sim.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -11,3 +16,7 @@ reqwest = { version = "0.12", features = ["json"] }
 chrono = "0.4"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
+tonic = { version = "0.12", features = ["gzip", "tls", "tls-webpki-roots"] }
+prost = "0.13"
+opentelemetry-proto = { version = "0.7", features = ["gen-tonic", "trace"] }
+base64 = "0.22"
