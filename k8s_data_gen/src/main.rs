@@ -4,14 +4,18 @@
 ///   cargo run -- historical [--days N] [--stream logs|metrics|traces|all]
 ///   cargo run -- ingest [FILE] [--org ORG] [--stream STREAM]
 ///   cargo run -- live [--stream logs|metrics|traces] [--anomaly TYPE] [--grpc]
+///   cargo run -- corr          # one-shot correlatable logs+metrics+traces
+///   cargo run -- repro         # reproduce issue #1848
 ///
 /// ANOMALY TYPES: cpu | memory | errors | restarts | latency | login
 mod anomaly;
 mod client;
 mod config;
+mod corr;
 mod ingest;
 mod logs;
 mod metrics;
+mod repro;
 mod topology;
 mod traces;
 mod utils;
@@ -98,6 +102,20 @@ async fn main() {
             }
         }
 
+        "corr" => {
+            if let Err(e) = corr::run_corr().await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+
+        "repro" => {
+            if let Err(e) = repro::run_repro().await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+
         "help" | "--help" | "-h" => print_usage(),
         _ => {
             print_usage();
@@ -130,6 +148,12 @@ fn print_usage() {
     println!("    k8s_traces  → /v1/traces OTLP  (stream_type=traces)\n");
     println!("  cargo run -- live [--stream logs|metrics|traces] [--anomaly TYPE] [--grpc]");
     println!("    --grpc: use gRPC OTLP for traces (port 5081, prod service flows)\n");
+    println!("  cargo run -- corr");
+    println!("    One-shot: correlatable logs+metrics+traces for 3 services.");
+    println!("    All types share service.name+namespace — verifies normal correlation.\n");
+    println!("  cargo run -- repro");
+    println!("    Reproduce issue #1848: ECS-style logs (no service.name) + traces");
+    println!("    with service.name, same namespace — shows split in Discovered Services.\n");
     println!("ANOMALY TYPES: cpu | memory | errors | restarts | latency | login\n");
     println!("EXAMPLES:");
     println!("  cargo run -- historical --days 7 --stream all");
